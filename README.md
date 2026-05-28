@@ -3,6 +3,7 @@
 面向人类开发者和 LLM Agent 的本地优先代码搜索与跳转 CLI。
 
 设计方案先看 [`docs/00-design-summary.md`](docs/00-design-summary.md)。其他文档是展开材料。
+竞品与定位分析报告见 [`HTML`](docs/12-competitive-analysis-report.html) / [`PDF`](docs/12-competitive-analysis-report.pdf)。
 
 这个项目是对旧 `git-ai` 方向的 Rust 重新设计。它不是语义代码理解引擎，
 而是一个让 Agent 像使用 IDE 一样高效获取代码信息的工具：搜索、跳转、读取、引用、影响分析都必须返回可验证证据。

@@ -70,6 +70,8 @@ Source Snapshot
 
 ## 竞品借鉴
 
+完整竞品与定位分析报告见 [`HTML`](12-competitive-analysis-report.html) / [`PDF`](12-competitive-analysis-report.pdf)。
+
 - GitHub Code Search：学 Rust code-specific text index。
 - Sourcegraph：学 text search 和 precise navigation 分层。
 - CodeGraphContext：学 pluggable graph backend。
@@ -84,4 +86,3 @@ Source Snapshot
 - 不让 remote 覆盖本地 dirty/staged 状态。
 - 不让 watcher 替代 git hook。
 - 不让 Agent 在多套 shell 工具输出之间来回猜。
-
