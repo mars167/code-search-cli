@@ -168,15 +168,32 @@ pub fn status(workspace: &Workspace) -> Result<Value> {
 pub fn fresh_file_records(
     workspace: &Workspace,
     opts: &ScanOptions,
+    path_pattern: Option<&str>,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
     let Some((manifest, records, text_path)) = fresh_text_snapshot(workspace, opts)? else {
         return Ok(None);
     };
 
-    Ok(Some((
-        records,
-        text_index_meta(&manifest, text_path, None, None),
-    )))
+    let (filtered, prefilter, candidate_count) = match path_pattern {
+        Some(pattern) if !pattern.is_empty() => {
+            let path_idx = text_path.join("paths.idx");
+            match text_index::candidate_path_ids(&path_idx, pattern)? {
+                Some(ids) => {
+                    let filtered = records
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(doc_id, record)| ids.contains(&doc_id).then_some(record))
+                        .collect::<Vec<_>>();
+                    (filtered, Some("trigram_path"), Some(ids.len()))
+                }
+                None => (records, Some("skipped"), None),
+            }
+        }
+        _ => (records, None, None),
+    };
+
+    let index_meta = text_index_meta(&manifest, text_path, prefilter, candidate_count);
+    Ok(Some((filtered, index_meta)))
 }
 
 pub fn fresh_text_records(
@@ -189,7 +206,25 @@ pub fn fresh_text_records(
         return Ok(None);
     };
 
-    let candidate_ids = text_index::candidate_ids(&text_path.join("grams.idx"), pattern, mode)?;
+    let grams_path = text_path.join("grams.idx");
+    let candidate_ids = text_index::candidate_ids(&grams_path, pattern, mode)?;
+    let (prefilter, skipped_reason) = match mode {
+        "literal" if pattern.len() < 3 => (Some("skipped"), Some("pattern_too_short")),
+        "literal" => match &candidate_ids {
+            Some(_) => (Some("trigram_literal"), None),
+            None => (Some("skipped"), Some("no_trigrams_extracted")),
+        },
+        "regex" => {
+            let has_literal = has_regex_literal_substring(pattern);
+            match (&candidate_ids, has_literal) {
+                (Some(_), _) => (Some("trigram_regex"), None),
+                (None, false) => (Some("skipped"), Some("no_trigrams_in_regex_pattern")),
+                (None, true) => (Some("skipped"), Some("trigram_intersection_empty")),
+            }
+        }
+        _ => (Some("skipped"), Some("unsupported_mode")),
+    };
+
     let filtered = match &candidate_ids {
         Some(ids) => records
             .into_iter()
@@ -198,13 +233,55 @@ pub fn fresh_text_records(
             .collect::<Vec<_>>(),
         None => records,
     };
-    let prefilter = candidate_ids.as_ref().map(|_| "trigram");
-    let candidate_count = candidate_ids.as_ref().map(|ids| ids.len());
 
-    Ok(Some((
-        filtered,
-        text_index_meta(&manifest, text_path, prefilter, candidate_count),
-    )))
+    let index_meta = if let Some(reason) = skipped_reason {
+        let mut value = text_index_meta(
+            &manifest,
+            text_path,
+            prefilter,
+            candidate_ids.as_ref().map(|ids| ids.len()),
+        );
+        value["prefilterSkipReason"] = serde_json::json!(reason);
+        value
+    } else {
+        text_index_meta(
+            &manifest,
+            text_path,
+            prefilter,
+            candidate_ids.as_ref().map(|ids| ids.len()),
+        )
+    };
+
+    Ok(Some((filtered, index_meta)))
+}
+
+/// Check if a regex pattern contains at least one literal substring of length >= 3
+fn has_regex_literal_substring(pattern: &str) -> bool {
+    let mut run = 0usize;
+    let mut escape = false;
+    for ch in pattern.chars() {
+        if escape {
+            run += 1;
+            escape = false;
+            if run >= 3 {
+                return true;
+            }
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '.' | '*' | '+' | '?' | '|' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' => {
+                run = 0;
+            }
+            _ => {
+                run += 1;
+                if run >= 3 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 impl From<&ScanOptions> for IndexScanOptions {

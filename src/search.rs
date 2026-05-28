@@ -27,8 +27,8 @@ pub fn files(
     } else {
         None
     };
-
-    let source = candidate_files(workspace, opts)?;
+    // Use path index prefilter when available
+    let source = candidate_files(workspace, opts, Some(pattern))?;
     for file in source.records {
         let matches = matcher
             .as_ref()
@@ -288,8 +288,12 @@ struct CandidateFiles {
     index: Value,
 }
 
-fn candidate_files(workspace: &Workspace, opts: &ScanOptions) -> Result<CandidateFiles> {
-    if let Some((records, index)) = index::fresh_file_records(workspace, opts)? {
+fn candidate_files(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    path_pattern: Option<&str>,
+) -> Result<CandidateFiles> {
+    if let Some((records, index)) = index::fresh_file_records(workspace, opts, path_pattern)? {
         return Ok(CandidateFiles {
             records: filter_records(records, opts),
             index,
@@ -341,7 +345,6 @@ fn filter_records(records: Vec<FileRecord>, opts: &ScanOptions) -> Vec<FileRecor
         })
         .collect()
 }
-
 fn text_search_producer(refs_mode: bool, index_used: bool) -> &'static str {
     match (refs_mode, index_used) {
         (true, true) => "text_index_identifier_boundary_search",
