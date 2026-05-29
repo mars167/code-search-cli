@@ -94,6 +94,7 @@ pub enum Command {
     },
     Changed,
     Status,
+    Mcp,
     Watch {
         #[arg(long)]
         once: bool,

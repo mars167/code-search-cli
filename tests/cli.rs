@@ -802,3 +802,29 @@ fn serve_with_watch_includes_watcher_status() {
         assert!(watcher["root"].is_string());
     }
 }
+
+// ---------------------------------------------------------------------------
+// MCP integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_subcommand_is_registered_in_help() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "hello\n").unwrap();
+
+    // Verify "mcp" appears in the subcommand list
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--help")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(output).unwrap();
+    assert!(
+        help.contains("mcp"),
+        "mcp subcommand not found in help: {help}"
+    );
+}

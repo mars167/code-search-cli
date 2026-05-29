@@ -14,4 +14,6 @@ pub mod watcher;
 pub mod workspace;
 
 pub mod graph;
+pub mod mcp;
+pub mod query;
 pub type AppResult<T> = anyhow::Result<T>;

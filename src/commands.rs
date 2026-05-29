@@ -313,6 +313,11 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             json!([search::status(&workspace)]),
             Vec::new(),
         ),
+        Command::Mcp => {
+            let server = crate::mcp::Server::new(&workspace.root)?;
+            server.run()?;
+            return Ok(0);
+        }
         Command::Watch { once, status } => {
             let mut watcher = crate::watcher::Watcher::start(&workspace.root)?;
 
