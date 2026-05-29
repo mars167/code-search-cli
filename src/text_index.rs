@@ -183,6 +183,12 @@ fn intersect_postings(
 /// Extract mandatory trigrams from a regex pattern by finding contiguous literal substrings.
 /// Returns the set of trigrams that MUST appear in any matching text.
 fn extract_regex_trigrams(pattern: &str) -> HashSet<[u8; 3]> {
+    // If the pattern contains alternation (|) outside of character classes,
+    // the literal substrings are not all mandatory — skip prefilter.
+    if has_regex_alternation(pattern) {
+        return HashSet::new();
+    }
+
     let mut grams = HashSet::new();
     let mut current_literal = Vec::new();
     let mut escape = false;
@@ -214,6 +220,28 @@ fn extract_regex_trigrams(pattern: &str) -> HashSet<[u8; 3]> {
         grams.extend(grams_for_bytes(&current_literal));
     }
     grams
+}
+
+/// Check if a regex pattern contains alternation (|) outside of character classes.
+/// If so, the literal substrings are not all mandatory — trigram prefilter must be skipped.
+fn has_regex_alternation(pattern: &str) -> bool {
+    let mut in_char_class = false;
+    let mut escape = false;
+
+    for ch in pattern.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '[' => in_char_class = true,
+            ']' => in_char_class = false,
+            '|' if !in_char_class => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -780,11 +808,9 @@ mod tests {
         // ch='+' -> flush -> grams from "log.w": "log", "og.", "g.w"
         assert!(grams.contains(&[b'l', b'o', b'g']));
 
-        // Pattern with alternation
+        // Pattern with alternation: must return empty (no mandatory trigrams)
         let grams = extract_regex_trigrams("(foo|bar)");
-        // '(', flush empty, 'f','o','o' -> current, '|', flush "foo", 'b','a','r', ')', flush "bar"
-        assert!(grams.contains(&[b'f', b'o', b'o']));
-        assert!(grams.contains(&[b'b', b'a', b'r']));
+        assert!(grams.is_empty()); // | means not all literals are mandatory
     }
 
     #[test]

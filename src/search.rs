@@ -28,7 +28,15 @@ pub fn files(
         None
     };
     // Use path index prefilter when available
-    let source = candidate_files(workspace, opts, Some(pattern))?;
+    let source = candidate_files(
+        workspace,
+        opts,
+        if has_glob_meta(pattern) {
+            None
+        } else {
+            Some(pattern)
+        },
+    )?;
     for file in source.records {
         let matches = matcher
             .as_ref()
