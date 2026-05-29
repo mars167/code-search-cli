@@ -12,4 +12,5 @@ pub mod syntax;
 pub mod text_index;
 pub mod workspace;
 
+pub mod graph;
 pub type AppResult<T> = anyhow::Result<T>;

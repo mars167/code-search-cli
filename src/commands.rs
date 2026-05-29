@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::{
     cli::{Cli, Command, HooksCommand, IndexCommand},
-    completions, index, output, scip_index, search, syntax,
+    completions, graph, index, output, scip_index, search, syntax,
     workspace::{ScanOptions, Workspace},
     AppResult,
 };
@@ -217,6 +217,29 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             )
         }
         Command::Calls { identifier } => {
+            // Try graph backend first (if built and fresh)
+            let graph_store = graph::GraphStore::open(&workspace).ok();
+            if let Some(ref store) = graph_store {
+                if store.freshness_check().unwrap_or(false) {
+                    let results = store.query_calls(identifier).unwrap_or_default();
+                    let index_meta = store.index_meta(true);
+                    let warnings: Vec<String> = Vec::new();
+                    return emit_response(
+                        &cli.output,
+                        output::response_with_index(
+                            "calls",
+                            "calls",
+                            json!({ "identifier": identifier, "producer": "graph" }),
+                            &workspace.snapshot_id,
+                            output::inferred_candidate(),
+                            index_meta,
+                            json!(results),
+                            warnings,
+                        ),
+                    );
+                }
+            }
+            // Fall back to tree-sitter
             let (results, warnings) = syntax::calls(&workspace, &scan_opts, identifier)?;
             exit_code = output::no_match_exit(&results);
             output::response(
@@ -230,6 +253,29 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             )
         }
         Command::Callers { identifier } => {
+            // Try graph backend first (if built and fresh)
+            let graph_store = graph::GraphStore::open(&workspace).ok();
+            if let Some(ref store) = graph_store {
+                if store.freshness_check().unwrap_or(false) {
+                    let results = store.query_callers(identifier).unwrap_or_default();
+                    let index_meta = store.index_meta(true);
+                    let warnings: Vec<String> = Vec::new();
+                    return emit_response(
+                        &cli.output,
+                        output::response_with_index(
+                            "callers",
+                            "callers",
+                            json!({ "identifier": identifier, "producer": "graph" }),
+                            &workspace.snapshot_id,
+                            output::inferred_candidate(),
+                            index_meta,
+                            json!(results),
+                            warnings,
+                        ),
+                    );
+                }
+            }
+            // Fall back to tree-sitter
             let (results, warnings) = syntax::callers(&workspace, &scan_opts, identifier)?;
             exit_code = output::no_match_exit(&results);
             output::response(

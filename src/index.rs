@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    snapshot_store, text_index,
+    graph, snapshot_store, text_index,
     workspace::{read_staged_blob, staged_tree, tracked_files, FileRecord, ScanOptions, Workspace},
 };
 
@@ -105,6 +105,12 @@ pub fn build(
         snapshot_store::build_snapshot(&snapshot_tmp, &records, &workspace.root)?;
     }
     text_index::write(&text_tmp, workspace, &records, !staged)?;
+
+    // Build call graph (best-effort; non-fatal on failure)
+    if !staged {
+        let _ =
+            crate::graph::GraphStore::open(workspace).and_then(|mut store| store.build(workspace));
+    }
 
     remove_dir_if_exists(&snapshot_target)?;
     remove_dir_if_exists(&text_target)?;
@@ -228,8 +234,23 @@ pub fn live_scan_index_meta(reason: &str) -> Value {
 }
 
 pub fn verify(workspace: &Workspace) -> Result<(Value, i32)> {
-    let value = status(workspace)?;
-    let fresh = value.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+    let mut value = status(workspace)?;
+    let mut fresh = value.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+
+    // Also verify graph freshness
+    if fresh {
+        if let Ok(store) = graph::GraphStore::open(workspace) {
+            let graph_fresh = store.freshness_check().unwrap_or(false);
+            value["graphFresh"] = json!(graph_fresh);
+            if !graph_fresh {
+                fresh = false;
+            }
+        } else {
+            value["graphFresh"] = json!(false);
+            fresh = false;
+        }
+    }
+
     Ok((value, if fresh { 0 } else { 6 }))
 }
 
@@ -395,7 +416,7 @@ fn active_manifest_path(workspace: &Workspace, staged: bool) -> PathBuf {
     active_dir(workspace, staged).join("manifest.json")
 }
 
-fn snapshot_key(snapshot_id: &str) -> String {
+pub(crate) fn snapshot_key(snapshot_id: &str) -> String {
     snapshot_id
         .chars()
         .map(|ch| match ch {

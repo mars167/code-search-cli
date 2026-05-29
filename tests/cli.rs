@@ -366,13 +366,13 @@ fn calls_and_callers_do_not_claim_graph_store_before_kuzu_backend_exists() {
         .stdout
         .clone();
     let calls_json: Value = serde_json::from_slice(&calls).unwrap();
-    assert_eq!(calls_json["index"]["used"], false);
+    // graph backend exists now (petgraph), so index is used
+    assert_eq!(calls_json["index"]["used"], true);
     assert_eq!(calls_json["reliability"]["level"], "inferred_candidate");
-    assert_eq!(
-        calls_json["results"][0]["producer"],
-        "tree_sitter_call_heuristic"
-    );
     assert_eq!(calls_json["results"][0]["target"], "beta");
+    // producer reflects the graph source (tree-sitter heuristic inside graph)
+    let producer = calls_json["results"][0]["producer"].as_str().unwrap_or("");
+    assert!(producer.starts_with("graph:"));
 
     let callers = code_search()
         .arg("--path")
@@ -384,10 +384,11 @@ fn calls_and_callers_do_not_claim_graph_store_before_kuzu_backend_exists() {
         .stdout
         .clone();
     let callers_json: Value = serde_json::from_slice(&callers).unwrap();
-    assert_eq!(
-        callers_json["results"][0]["producer"],
-        "tree_sitter_call_heuristic"
-    );
+    // producer reflects the graph source
+    let cproducer = callers_json["results"][0]["producer"]
+        .as_str()
+        .unwrap_or("");
+    assert!(cproducer.starts_with("graph:"));
     assert_eq!(callers_json["results"][0]["enclosingSymbol"], "alpha");
 }
 

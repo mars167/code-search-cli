@@ -34,6 +34,8 @@ parquet = { version = "53", default-features = false, features = ["arrow"] }
 prost = "0.13"
 prost-types = "0.13"
 rusqlite = { version = "0.31", features = ["bundled"] }
+petgraph = { version = "0.6", features = ["serde"] }
+bincode = "1"
 
 
 [dev-dependencies]
