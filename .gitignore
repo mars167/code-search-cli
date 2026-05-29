@@ -1,5 +1,6 @@
 /target/
 /.code-search/
+/.pdca/
 
 # Local editor and OS files
 .DS_Store
