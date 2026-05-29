@@ -158,7 +158,7 @@ pub fn hooks_install(workspace: &Workspace) -> Result<Value> {
         ),
         (
             "post-commit",
-            "#!/bin/sh\ncode-search index update >/dev/null 2>&1 || true\n",
+            "#!/bin/sh\ncode-search index build >/dev/null 2>&1 || true\n",
         ),
         (
             "post-checkout",

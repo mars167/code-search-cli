@@ -104,6 +104,13 @@ impl IndexScheduler {
         fs::rename(&snapshot_tmp, &snapshot_target)?;
         fs::rename(&text_tmp, &text_target)?;
 
+        // Write staged manifest for post-commit promotion
+        if staged {
+            let staged_dir = self.storage_root.join("staged");
+            fs::create_dir_all(&staged_dir)?;
+            write_manifest(&staged_dir.join("manifest.json"), &manifest)?;
+        }
+
         // Promote: staged snapshot → committed snapshot OR tmp → working
         if staged {
             promote_staged_to_commit(&self.workspace_root)?;
