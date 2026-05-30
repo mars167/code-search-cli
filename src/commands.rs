@@ -447,7 +447,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     json!({ "path": path }),
                     &workspace.snapshot_id,
                     output::freshness(),
-                    value,
+                    json!([value]),
                     Vec::new(),
                 )
             }

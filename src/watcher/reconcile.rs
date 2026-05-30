@@ -3,8 +3,7 @@ use std::{collections::HashMap, fs, path::Path, time::SystemTime};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{snapshot_store, workspace::FileRecord};
-
+use crate::{lancedb_store, snapshot_store, workspace::FileRecord};
 /// Result of a reconcile operation comparing workspace files with the snapshot.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,26 +167,51 @@ fn now_epoch_ms() -> u64 {
 fn resolve_snapshot_records(code_search_dir: &Path, working_dir: &Path) -> Vec<FileRecord> {
     let manifest_path = working_dir.join("manifest.json");
 
-    // Try to find the snapshot key from the manifest
-    if let Ok(manifest_content) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_content) {
-            if let Some(key) = manifest
+    // Read snapshot key and id from manifest
+    let (snapshot_key, snapshot_id) = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .map(|manifest| {
+            let key = manifest
                 .get("snapshotKey")
                 .or_else(|| manifest.get("snapshot_key"))
                 .and_then(|v| v.as_str())
-            {
-                let parquet_path = code_search_dir
-                    .join("snapshots")
-                    .join(key)
-                    .join("files.parquet");
-                if parquet_path.exists() {
-                    return snapshot_store::read_files_parquet(&parquet_path).unwrap_or_default();
+                .map(|s| s.to_string());
+            let id = manifest
+                .get("snapshotId")
+                .or_else(|| manifest.get("snapshot_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            (key, id)
+        })
+        .unwrap_or((None, None));
+
+    // Try LanceDB first (use snapshot_id, not snapshot_key)
+    if let Some(ref id) = snapshot_id {
+        let root = code_search_dir.parent().unwrap_or(code_search_dir);
+        if lancedb_store::is_available(root) {
+            if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(root) {
+                if let Ok(records) = store.read_file_records(id) {
+                    if !records.is_empty() {
+                        return records;
+                    }
                 }
             }
         }
     }
 
-    // Fallback: try working/files.parquet directly
+    // Fallback: try parquet from snapshots/<key>/files.parquet
+    if let Some(ref key) = snapshot_key {
+        let parquet_path = code_search_dir
+            .join("snapshots")
+            .join(key)
+            .join("files.parquet");
+        if parquet_path.exists() {
+            return snapshot_store::read_files_parquet(&parquet_path).unwrap_or_default();
+        }
+    }
+
+    // Last fallback: try working/files.parquet directly
     let working_parquet = working_dir.join("files.parquet");
     if working_parquet.exists() {
         return snapshot_store::read_files_parquet(&working_parquet).unwrap_or_default();

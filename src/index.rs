@@ -87,6 +87,11 @@ pub fn build(
 
     write_to_lancedb(workspace, &manifest, &records, staged)?;
 
+    // Write active manifest for pack/unpack compatibility
+    let active_dir = active_dir(workspace, staged);
+    fs::create_dir_all(&active_dir)?;
+    write_manifest(&active_dir.join("manifest.json"), &manifest)?;
+
     // Build call graph (best-effort; non-fatal on failure)
     if !staged {
         let _ =

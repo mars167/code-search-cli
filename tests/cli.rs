@@ -140,10 +140,7 @@ fn index_build_writes_lancedb_only_storage() {
     // Old JSON/.idx artifacts are no longer written
     assert!(!code_search_dir.join("snapshots").exists());
     assert!(!code_search_dir.join("text").exists());
-    assert!(!code_search_dir
-        .join("working")
-        .join("manifest.json")
-        .is_file());
+    // working/manifest.json is written for pack/unpack compatibility
 
     // Build output declares lancedb backend
     let output = code_search()
