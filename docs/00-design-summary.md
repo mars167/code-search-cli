@@ -86,3 +86,13 @@ Source Snapshot
 - 不让 remote 覆盖本地 dirty/staged 状态。
 - 不让 watcher 替代 git hook。
 - 不让 Agent 在多套 shell 工具输出之间来回猜。
+
+## 质量看护
+
+测试架构见 `docs/18-quality-guard-test-architecture.md`。质量门禁按测试金字塔分层：
+
+- PR 默认阻断：格式、编译、单元测试、CLI contract、git diff whitespace。
+- 扩展阻断：真实仓库 L0 smoke、性能基准回归。
+- 趋势看护：SWE-bench agent 搜索效率和解决率。
+
+统一本地入口是 `scripts/quality-gate.sh quick|cli|bench|full`。

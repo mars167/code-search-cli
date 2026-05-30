@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>code-search-cli on RuoYi: E2E Test Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --border: #d7deea;
+      --text: #172033;
+      --muted: #56627a;
+      --pass: #1f7a42;
+      --warn: #9a6400;
+      --fail: #b42318;
+      --info: #175cd3;
+      --pass-bg: #edf9f0;
+      --warn-bg: #fff6e5;
+      --fail-bg: #fff0f0;
+      --info-bg: #eef4ff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.25; }
+    h1 { font-size: 30px; }
+    h2 { font-size: 20px; margin-top: 28px; }
+    h3 { font-size: 16px; margin-top: 20px; }
+    p, ul { margin: 0 0 12px; }
+
+    .hero, .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px 22px;
+      box-shadow: 0 8px 24px rgba(23, 32, 51, 0.05);
+    }
+
+    .hero {
+      display: grid;
+      gap: 16px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+      color: var(--muted);
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      background: #fbfcfe;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .metric .value {
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+
+    .pass { color: var(--pass); background: var(--pass-bg); border-color: #cdebd4; }
+    .warn { color: var(--warn); background: var(--warn-bg); border-color: #f0d89b; }
+    .fail { color: var(--fail); background: var(--fail-bg); border-color: #f2c1c1; }
+    .info { color: var(--info); background: var(--info-bg); border-color: #cddcff; }
+
+    code, pre {
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      margin: 8px 0 0;
+      overflow: auto;
+      padding: 12px;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f8faff;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .cols-2 {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .muted { color: var(--muted); }
+
+    @media (max-width: 900px) {
+      body { padding: 16px; }
+      .summary, .meta, .cols-2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div>
+        <h1>code-search-cli on RuoYi</h1>
+        <p>端到端命令验证报告。被测对象是 <code>code-search 0.1.0</code>，数据集是克隆到工作区的 <code>RuoYi</code> 仓库；本次测试验证的是 <code>code-search-cli</code> 的功能，不是 RuoYi 应用本身。</p>
+      </div>
+
+      <div class="meta">
+        <div><strong>测试日期</strong><br /><span class="muted">2026-05-29</span></div>
+        <div><strong>被测二进制</strong><br /><span class="muted">/Users/mars/dev/git-ai-workspace/code-search-cli/target/debug/code-search</span></div>
+        <div><strong>数据集仓库</strong><br /><span class="muted">/Users/mars/dev/git-ai-workspace/RuoYi</span></div>
+        <div><strong>RuoYi 提交</strong><br /><span class="muted">master @ 45890b4641c2e7e2989aa1f518b09cf187b4af7b</span></div>
+        <div><strong>JDK</strong><br /><span class="muted">OpenJDK 21.0.10</span></div>
+        <div><strong>仓库概况</strong><br /><span class="muted">285 Java / 149 HTML / 90 JS / 629 个被索引文本文件</span></div>
+      </div>
+
+      <div class="summary">
+        <div class="metric">
+          <div class="label">总检查项</div>
+          <div class="value">39</div>
+        </div>
+        <div class="metric">
+          <div class="label">通过</div>
+          <div class="value" style="color: var(--pass);">36</div>
+        </div>
+        <div class="metric">
+          <div class="label">警告</div>
+          <div class="value" style="color: var(--warn);">3</div>
+        </div>
+        <div class="metric">
+          <div class="label">失败</div>
+          <div class="value" style="color: var(--fail);">0</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="cols-2">
+      <section class="panel">
+        <h2>结论</h2>
+        <ul>
+          <li>主命令面已覆盖：源码事实、路径浏览、索引生命周期、parser fallback、关系候选、hook/watch/serve 状态命令、SCIP 兼容导入、shell completions。</li>
+          <li>在 RuoYi 这类多模块 Java 仓库上，基础 L0 查询与索引查询路径都可用；literal <code>find</code> 能切到 fresh text index 并显示 <code>prefilter=trigram</code>。</li>
+          <li>JS parser path 可工作：在 <code>ruoyi-admin/src/main/resources/static/ruoyi/login.js</code> 上，<code>symbols</code>、<code>defs</code>、<code>calls</code>、<code>callers</code> 都返回了预期结果。</li>
+          <li>通过一个临时最小 SCIP JSON fixture，<code>index import-scip</code> 以及 precise <code>symbols/defs/refs</code> 也已验证通过。</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h2>重点发现</h2>
+        <ul>
+          <li><span class="tag warn">Warning</span> Java 当前不在 tree-sitter parser 支持列表内。对 <code>GenController.java</code> 执行 <code>defs GenController</code> 时返回空结果且无 warning 文案，行为稳定但可读性不够强。</li>
+          <li><span class="tag warn">Warning</span> <code>index build</code> 会在目标仓库创建未跟踪的 <code>.code-search/</code>；随后 <code>changed</code> 会把它报出来，影响“工作区是否有真实源码变更”的语义。</li>
+          <li><span class="tag warn">Warning</span> <code>import-scip</code> 目前绑定到当前 snapshot key。若 <code>.code-search/</code> 让仓库从 <code>commit:*</code> 切到 <code>worktree:*</code>，precise 查询会错过刚导入的 SCIP 索引。本次用临时本地 ignore 验证了这是 snapshot 切换问题，而不是 SCIP 数据本身有误；验证后已撤销该本地 ignore。</li>
+        </ul>
+      </section>
+    </div>
+
+    <section class="panel" style="margin-top: 18px;">
+      <h2>覆盖矩阵</h2>
+      <p class="muted">说明：下表按命令家族归并。别名未单独重复验证，主命令路径已覆盖。</p>
+      <table>
+        <thead>
+          <tr>
+            <th>命令 / 主题</th>
+            <th>样例</th>
+            <th>观察结果</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>status</code> / <code>changed</code>（clean）</td>
+            <td><code>status</code>, <code>changed</code></td>
+            <td>RuoYi clone 初始状态为 <code>dirty=false</code>，<code>changed</code> 返回 0 条。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>路径与文件目录查询</td>
+            <td><code>files GenController</code>, <code>find-path SysLogininfor.java</code>, <code>glob *.sql</code></td>
+            <td>都能命中目标路径；<code>glob</code> 正确返回 <code>sql/quartz.sql</code> 与 <code>sql/ry_20260319.sql</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>目录浏览 / 读取</td>
+            <td><code>list sql</code>, <code>tree .../static/ruoyi --depth 1</code>, <code>read login.js:1-20</code></td>
+            <td>目录枚举与片段读取正常，读取结果给出了稳定的行号范围。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>index build</code></td>
+            <td><code>index build</code></td>
+            <td>成功写入 <code>.code-search</code>，文本索引文件数为 629，snapshot 为 <code>commit:45890b4641c2</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>index status</code> / <code>index verify</code></td>
+            <td><code>index status</code>, <code>index verify</code></td>
+            <td>fresh 为 true，<code>staleFiles</code> 与 <code>missingFiles</code> 都为 0。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>indexed literal search</td>
+            <td><code>find validateKickout</code></td>
+            <td><code>index.used=true</code>，<code>prefilter=trigram</code>，候选数 1，结果命中 <code>login.js</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>indexed regex search</td>
+            <td><code>grep 'login(Name|Time)'</code></td>
+            <td><code>index.used=true</code>，regex 路径不带 trigram prefilter，但结果来自 fresh index 查询路径。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>refs</code></td>
+            <td><code>refs loginName</code></td>
+            <td>命中 100 条，producer 为 <code>text_index_identifier_boundary_search</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>JS parser fallback</td>
+            <td><code>symbols validateRule</code>, <code>defs getParam</code> on <code>login.js</code></td>
+            <td>都返回 <code>parser_fact</code>，producer 为 <code>tree_sitter_parser</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>JS relation candidates</td>
+            <td><code>calls validateKickout</code>, <code>callers getParam</code></td>
+            <td><code>calls</code> 返回 5 条候选，首条为 <code>getParam</code>；<code>callers</code> 返回 1 条，<code>enclosingSymbol=validateKickout</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>Java unsupported parser degradation</td>
+            <td><code>defs GenController</code> on <code>GenController.java</code></td>
+            <td>命令稳定返回空结果，reliability 仍为 <code>parser_fact</code>，但 warnings 为空。</td>
+            <td><span class="tag warn">Warning</span></td>
+          </tr>
+          <tr>
+            <td><code>index import-scip</code></td>
+            <td>导入临时最小 <code>ruoyi-login.scip.json</code></td>
+            <td>成功写入 <code>occurrences.idx</code>，recordCount=2，definitionCount=1。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td>precise <code>symbols/defs/refs</code></td>
+            <td><code>symbols getParam</code>, <code>defs getParam</code>, <code>refs getParam</code></td>
+            <td>都切到 <code>precise_fact</code>，producer 为 <code>scip</code>；definition 在第 93 行，reference 在第 71 行。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>index update</code></td>
+            <td><code>index update</code></td>
+            <td>成功执行，返回 <code>changedOnly=true</code> 的索引刷新结果。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>changed</code>（post-index）</td>
+            <td><code>changed</code> after <code>index build</code></td>
+            <td>返回 1 条未跟踪路径 <code>.code-search/</code>，会把索引缓存当作工作区变化暴露出来。</td>
+            <td><span class="tag warn">Warning</span></td>
+          </tr>
+          <tr>
+            <td><code>hooks install/status/uninstall</code></td>
+            <td><code>hooks install</code>, <code>hooks status</code>, <code>hooks uninstall</code></td>
+            <td>5 个 hook 全部可安装、可识别、可移除，卸载后状态恢复为全部 false。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>watch --once</code></td>
+            <td><code>watch --once</code></td>
+            <td>成功执行一次性 reconcile / rebuild 路径，返回 fresh text index 结果。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>watch</code> / <code>watch --status</code></td>
+            <td>plain + status</td>
+            <td>都返回 watcher 状态契约；当前实现为 <code>mode=status_only</code>，<code>running=false</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>serve</code> / <code>serve --no-watch</code></td>
+            <td>plain + <code>--no-watch</code></td>
+            <td>都返回 query service 状态；plain 模式 <code>watchEnabled=true</code>，<code>--no-watch</code> 为 false，均未启动独立长运行服务。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>completions bash</code></td>
+            <td><code>completions bash</code></td>
+            <td>输出包含 <code>complete -F _code_search code-search</code>。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+          <tr>
+            <td><code>index clean</code> + 收尾状态</td>
+            <td><code>index clean</code>, final <code>status</code>, final <code>changed</code></td>
+            <td>清理后 <code>.code-search</code> 被移除，RuoYi clone 回到 <code>dirty=false</code> / 0 changes。</td>
+            <td><span class="tag pass">Pass</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel" style="margin-top: 18px;">
+      <h2>关键原始片段</h2>
+      <h3>Literal find 走 fresh text index</h3>
+      <pre>{
+  "command": "find",
+  "indexUsed": true,
+  "indexFresh": true,
+  "prefilter": "trigram",
+  "candidateCount": 1,
+  "producer": "text_index_live_text_search",
+  "firstPath": "ruoyi-admin/src/main/resources/static/ruoyi/login.js"
+}</pre>
+
+      <h3>JS parser / callers 命中</h3>
+      <pre>{
+  "command": "callers",
+  "reliability": "inferred_candidate",
+  "resultCount": 1,
+  "firstTarget": "getParam",
+  "firstEnclosing": "validateKickout",
+  "firstPath": "ruoyi-admin/src/main/resources/static/ruoyi/login.js"
+}</pre>
+
+      <h3>Precise SCIP 查询命中</h3>
+      <pre>{
+  "command": "defs",
+  "reliability": "precise_fact",
+  "resultCount": 1,
+  "role": "definition",
+  "firstProducer": "scip",
+  "line": 93,
+  "indexUsed": true,
+  "indexSource": "scip_json"
+}</pre>
+    </section>
+
+    <section class="panel" style="margin-top: 18px;">
+      <h2>测试边界</h2>
+      <ul>
+        <li>本次测试没有启动 RuoYi Web 服务，也没有验证它的业务页面；RuoYi 只作为大体量真实仓库数据集。</li>
+        <li><code>index import-scip</code> 的验证使用了一个临时最小 SCIP JSON fixture，不是 RuoYi 仓库自带工件。</li>
+        <li>别名命令（例如 <code>ls</code> / <code>findpath</code> / <code>path</code>）未单独重复验证；主命令路径已覆盖。</li>
+      </ul>
+    </section>
+  </div>
+</body>
+</html>

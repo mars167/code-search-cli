@@ -1,0 +1,66 @@
+name: Quality Gate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      run_bench:
+        description: Run benchmark regression gate
+        required: false
+        default: "false"
+
+jobs:
+  quick:
+    name: Quick Gate
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.87-bookworm
+    steps:
+      - name: Install runner tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+          rustup component add rustfmt
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run quick quality gate
+        run: scripts/quality-gate.sh quick
+
+  cli:
+    name: CLI Gate
+    runs-on: ubuntu-latest
+    needs: quick
+    container:
+      image: rust:1.87-bookworm
+    steps:
+      - name: Install runner tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates jq
+          rustup component add rustfmt
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run CLI quality gate
+        run: scripts/quality-gate.sh cli
+
+  bench:
+    name: Benchmark Gate
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_bench == 'true' }}
+    container:
+      image: rust:1.87-bookworm
+    steps:
+      - name: Install runner tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates jq bc hyperfine
+          rustup component add rustfmt
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run benchmark quality gate
+        run: scripts/quality-gate.sh bench
