@@ -63,25 +63,8 @@ pub fn build(
     };
     let snapshot_key = snapshot_key(&snapshot_id);
 
-    let root = storage_root(workspace);
-    let snapshot_parent = root.join("snapshots");
-    let text_parent = root.join("text");
-    fs::create_dir_all(&snapshot_parent)?;
-    fs::create_dir_all(&text_parent)?;
-
-    let snapshot_target = snapshot_parent.join(&snapshot_key);
-    let text_target = text_parent.join(&snapshot_key);
-    let snapshot_tmp = snapshot_parent.join(format!("{snapshot_key}.tmp"));
-    let text_tmp = text_parent.join(format!("{snapshot_key}.tmp"));
-
-    remove_dir_if_exists(&snapshot_tmp)?;
-    remove_dir_if_exists(&text_tmp)?;
-    fs::create_dir_all(&snapshot_tmp)?;
-    let blobs_dir = snapshot_tmp.join("blobs");
-    fs::create_dir_all(&blobs_dir)?;
-
     let records = if staged {
-        staged_records(workspace, Some(&blobs_dir))?
+        staged_records(workspace, None)?
     } else {
         let mut scan_opts = opts.clone();
         scan_opts.limit = 0;
@@ -110,10 +93,7 @@ pub fn build(
             crate::graph::GraphStore::open(workspace).and_then(|mut store| store.build(workspace));
     }
 
-    let active_dir = active_dir(workspace, staged);
-    fs::create_dir_all(&active_dir)?;
-    write_manifest(&active_dir.join("manifest.json"), &manifest)?;
-
+    let root = storage_root(workspace);
     Ok(json!({
         "index": {
             "used": true,
@@ -1188,6 +1168,20 @@ fn write_to_lancedb(
 
     Ok(())
 }
+fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
+    let mut file = File::create(path)?;
+    serde_json::to_writer_pretty(&mut file, manifest)?;
+    writeln!(file)?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;

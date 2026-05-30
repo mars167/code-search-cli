@@ -1,16 +1,3 @@
-mod cli;
-mod commands;
-mod completions;
-mod index;
-mod lancedb_store;
-mod output;
-mod scip_index;
-mod search;
-mod syntax;
-mod text_index;
-mod workspace;
-
-use anyhow::Result;
 use clap::Parser;
 use code_search_cli::{cli::Cli, commands, output};
 

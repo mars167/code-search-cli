@@ -15,7 +15,6 @@ name = "code-search"
 path = "src/main.rs"
 [dependencies]
 anyhow = "1"
-arrow = "53"
 futures = "0.3"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }

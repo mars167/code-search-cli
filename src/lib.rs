@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod completions;
 pub mod index;
+pub mod lancedb_store;
 pub mod output;
 pub mod remote;
 pub mod scip;
