@@ -1175,12 +1175,6 @@ fn write_to_lancedb(
 
     Ok(())
 }
-fn remove_dir_if_exists(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_dir_all(path)?;
-    }
-    Ok(())
-}
 
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
     let mut file = File::create(path)?;

@@ -1,7 +1,4 @@
 use std::fs;
-use std::sync::Mutex;
-
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 use assert_cmd::Command;
 use serde_json::json;
@@ -903,9 +900,7 @@ fn index_unpack_extracts_to_remote_dir_does_not_touch_working_or_staged() {
         .assert()
         .success();
 
-    // Record state before unpack
     let code_search_dir = dir.path().join(".code-search");
-    let has_snapshots_before = code_search_dir.join("snapshots").exists();
     // Clean local index to simulate fresh workspace without local index
     code_search()
         .arg("--path")
@@ -935,8 +930,6 @@ fn index_unpack_extracts_to_remote_dir_does_not_touch_working_or_staged() {
     let remote_dir = code_search_dir.join("remote");
     assert!(remote_dir.exists());
 
-    // Verify local snapshots dir was NOT recreated (remote != local)
-    let snapshots_dir = code_search_dir.join("snapshots");
     // snapshots may or may not exist after clean, but remote must be separate
     let remote_entries: Vec<_> = remote_dir
         .read_dir()
