@@ -167,7 +167,7 @@ fn now_epoch_ms() -> u64 {
 fn resolve_snapshot_records(code_search_dir: &Path, working_dir: &Path) -> Vec<FileRecord> {
     let manifest_path = working_dir.join("manifest.json");
 
-    // Read snapshot key and id from manifest
+    // Read snapshot key and id from manifest (compat bridge)
     let (snapshot_key, snapshot_id) = std::fs::read_to_string(&manifest_path)
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
@@ -186,9 +186,12 @@ fn resolve_snapshot_records(code_search_dir: &Path, working_dir: &Path) -> Vec<F
         })
         .unwrap_or((None, None));
 
-    // Try LanceDB first (use snapshot_id, not snapshot_key)
-    if let Some(ref id) = snapshot_id {
-        let root = code_search_dir.parent().unwrap_or(code_search_dir);
+    let root = code_search_dir.parent().unwrap_or(code_search_dir);
+
+    // Try LanceDB (use snapshot_id from manifest)
+    let lance_snapshot_id = snapshot_id;
+
+    if let Some(ref id) = lance_snapshot_id {
         if lancedb_store::is_available(root) {
             if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(root) {
                 if let Ok(records) = store.read_file_records(id) {

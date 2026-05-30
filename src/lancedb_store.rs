@@ -1,3 +1,8 @@
+/// Escape single quotes in LanceDB filter strings to prevent query syntax errors.
+fn escape_filter(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 use anyhow::{Context, Result};
 use arrow::array::Array;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -11,6 +16,24 @@ pub struct LanceDbStore {
     db: Arc<lancedb::Connection>,
     #[allow(dead_code)]
     root: PathBuf,
+}
+
+use anyhow::anyhow;
+use arrow::record_batch::RecordBatch;
+
+/// Safely downcast a RecordBatch column to a specific Arrow array type.
+/// Returns an error instead of panicking if the type doesn't match.
+fn column_as<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
+    let col = batch
+        .column_by_name(name)
+        .ok_or_else(|| anyhow!("column '{}' not found in LanceDB batch", name))?;
+    col.as_any().downcast_ref::<T>().ok_or_else(|| {
+        anyhow!(
+            "column '{}' has unexpected Arrow type, expected {}",
+            name,
+            std::any::type_name::<T>()
+        )
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -183,7 +206,7 @@ impl LanceDbStore {
             return Ok(());
         }
 
-        use arrow::array::{BooleanArray, Int64Array, StringArray, UInt32Array, UInt64Array};
+        use arrow::array::{BooleanArray, StringArray, UInt32Array, UInt64Array};
         use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 
         let n = records.len();
@@ -201,7 +224,7 @@ impl LanceDbStore {
             file_paths.push(r.path.clone());
             languages.push(r.language.clone());
             size_bytes.push(r.size);
-            mtime_ns.push(r.mtime_ms as i64 * 1_000_000);
+            mtime_ns.push((r.mtime_ms * 1_000_000) as u64);
             modes.push(0u32);
             is_binary.push(false);
             is_ignored.push(false);
@@ -215,7 +238,7 @@ impl LanceDbStore {
                 std::sync::Arc::new(StringArray::from(file_paths)),
                 std::sync::Arc::new(StringArray::from(languages)),
                 std::sync::Arc::new(UInt64Array::from(size_bytes)),
-                std::sync::Arc::new(Int64Array::from(mtime_ns)),
+                std::sync::Arc::new(UInt64Array::from(mtime_ns)),
                 std::sync::Arc::new(UInt32Array::from(modes)),
                 std::sync::Arc::new(BooleanArray::from(is_binary)),
                 std::sync::Arc::new(BooleanArray::from(is_ignored)),
@@ -407,87 +430,48 @@ impl LanceDbStore {
     pub fn read_scip_occurrences(&self, snapshot_id: &str) -> Result<Vec<ScipOccurrence>> {
         let table = block_on(self.db.open_table("scip_occurrences").execute())
             .with_context(|| "failed to open scip_occurrences table")?;
-        let filter = format!("snapshot_id = '{}'", snapshot_id);
+        let filter = format!("snapshot_id = \'{}\'", escape_filter(snapshot_id));
         let mut stream = block_on(table.query().only_if(&filter).execute())
             .with_context(|| "failed to query scip_occurrences")?;
         let mut rows = Vec::new();
         while let Some(batch_result) = block_on(stream.next()) {
             let batch = batch_result.with_context(|| "failed to read scip_occurrences batch")?;
-            let col_sid = batch.column_by_name("snapshot_id").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_sym = batch.column_by_name("symbol").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_fp = batch.column_by_name("file_path").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_lang = batch.column_by_name("language").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_name = batch.column_by_name("name").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_kind = batch.column_by_name("kind").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_role = batch.column_by_name("role").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_rsl = batch.column_by_name("range_start_line").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_rsc = batch.column_by_name("range_start_col").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_rel = batch.column_by_name("range_end_line").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_rec = batch.column_by_name("range_end_col").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_isdef = batch.column_by_name("is_definition").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
-                    .unwrap()
-            });
-            let col_fh = batch.column_by_name("file_hash").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_es = batch.column_by_name("enclosing_symbol").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_prod = batch.column_by_name("producer").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
+            let col_sid = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "snapshot_id",
+            )?);
+            let col_sym = Some(column_as::<arrow::array::StringArray>(&batch, "symbol")?);
+            let col_fp = Some(column_as::<arrow::array::StringArray>(&batch, "file_path")?);
+            let col_lang = Some(column_as::<arrow::array::StringArray>(&batch, "language")?);
+            let col_name = Some(column_as::<arrow::array::StringArray>(&batch, "name")?);
+            let col_kind = Some(column_as::<arrow::array::StringArray>(&batch, "kind")?);
+            let col_role = Some(column_as::<arrow::array::StringArray>(&batch, "role")?);
+            let col_rsl = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "range_start_line",
+            )?);
+            let col_rsc = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "range_start_col",
+            )?);
+            let col_rel = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "range_end_line",
+            )?);
+            let col_rec = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "range_end_col",
+            )?);
+            let col_isdef = Some(column_as::<arrow::array::BooleanArray>(
+                &batch,
+                "is_definition",
+            )?);
+            let col_fh = Some(column_as::<arrow::array::StringArray>(&batch, "file_hash")?);
+            let col_es = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "enclosing_symbol",
+            )?);
+            let col_prod = Some(column_as::<arrow::array::StringArray>(&batch, "producer")?);
 
             if let (
                 Some(sid),
@@ -539,7 +523,7 @@ impl LanceDbStore {
     pub fn read_snapshot(&self, snapshot_id: &str) -> Result<Option<SnapShotRow>> {
         let table = block_on(self.db.open_table("snapshots").execute())
             .with_context(|| "failed to open snapshots table")?;
-        let filter = format!("snapshot_id = '{}'", snapshot_id);
+        let filter = format!("snapshot_id = \'{}\'", escape_filter(snapshot_id));
         let mut stream = block_on(table.query().only_if(&filter).execute())
             .with_context(|| "failed to query snapshots")?;
         while let Some(batch_result) = block_on(stream.next()) {
@@ -547,61 +531,38 @@ impl LanceDbStore {
             if batch.num_rows() == 0 {
                 return Ok(None);
             }
-            let col_snapshot_id = batch.column_by_name("snapshot_id").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_snapshot_key = batch.column_by_name("snapshot_key").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_schema_version = batch.column_by_name("schema_version").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_tool_version = batch.column_by_name("tool_version").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_repo_root = batch.column_by_name("repo_root").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_head = batch.column_by_name("head").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_dirty = batch.column_by_name("dirty").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::BooleanArray>()
-                    .unwrap()
-            });
-            let col_source = batch.column_by_name("source").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_scan_opts = batch.column_by_name("scan_options_json").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_file_count = batch.column_by_name("file_count").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt32Array>()
-                    .unwrap()
-            });
-            let col_created_at = batch.column_by_name("created_at_epoch_ms").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt64Array>()
-                    .unwrap()
-            });
+            let col_snapshot_id = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "snapshot_id",
+            )?);
+            let col_snapshot_key = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "snapshot_key",
+            )?);
+            let col_schema_version = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "schema_version",
+            )?);
+            let col_tool_version = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "tool_version",
+            )?);
+            let col_repo_root = Some(column_as::<arrow::array::StringArray>(&batch, "repo_root")?);
+            let col_head = Some(column_as::<arrow::array::StringArray>(&batch, "head")?);
+            let col_dirty = Some(column_as::<arrow::array::BooleanArray>(&batch, "dirty")?);
+            let col_source = Some(column_as::<arrow::array::StringArray>(&batch, "source")?);
+            let col_scan_opts = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "scan_options_json",
+            )?);
+            let col_file_count = Some(column_as::<arrow::array::UInt32Array>(
+                &batch,
+                "file_count",
+            )?);
+            let col_created_at = Some(column_as::<arrow::array::UInt64Array>(
+                &batch,
+                "created_at_epoch_ms",
+            )?);
 
             if let (
                 Some(sid),
@@ -657,37 +618,23 @@ impl LanceDbStore {
     pub fn read_file_catalog(&self, snapshot_id: &str) -> Result<Vec<FileCatalogRow>> {
         let table = block_on(self.db.open_table("file_catalog").execute())
             .with_context(|| "failed to open file_catalog table")?;
-        let filter = format!("snapshot_id = '{}'", snapshot_id);
+        let filter = format!("snapshot_id = \'{}\'", escape_filter(snapshot_id));
         let mut stream = block_on(table.query().only_if(&filter).execute())
             .with_context(|| "failed to query file_catalog")?;
         let mut rows = Vec::new();
         while let Some(batch_result) = block_on(stream.next()) {
             let batch = batch_result.with_context(|| "failed to read file_catalog batch")?;
-            let col_sid = batch.column_by_name("snapshot_id").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_fp = batch.column_by_name("file_path").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_lang = batch.column_by_name("language").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_sz = batch.column_by_name("size_bytes").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt64Array>()
-                    .unwrap()
-            });
-            let col_mt = batch.column_by_name("mtime_ns").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::Int64Array>()
-                    .unwrap()
-            });
+            let col_sid = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "snapshot_id",
+            )?);
+            let col_fp = Some(column_as::<arrow::array::StringArray>(&batch, "file_path")?);
+            let col_lang = Some(column_as::<arrow::array::StringArray>(&batch, "language")?);
+            let col_sz = Some(column_as::<arrow::array::UInt64Array>(
+                &batch,
+                "size_bytes",
+            )?);
+            let col_mt = Some(column_as::<arrow::array::UInt64Array>(&batch, "mtime_ns")?);
             if let (Some(sid), Some(fp), Some(lang), Some(sz), Some(mt)) =
                 (col_sid, col_fp, col_lang, col_sz, col_mt)
             {
@@ -708,32 +655,25 @@ impl LanceDbStore {
     pub fn read_file_proofs(&self, snapshot_id: &str) -> Result<Vec<FileProofRow>> {
         let table = block_on(self.db.open_table("file_proofs").execute())
             .with_context(|| "failed to open file_proofs table")?;
-        let filter = format!("snapshot_id = '{}'", snapshot_id);
+        let filter = format!("snapshot_id = \'{}\'", escape_filter(snapshot_id));
         let mut stream = block_on(table.query().only_if(&filter).execute())
             .with_context(|| "failed to query file_proofs")?;
         let mut rows = Vec::new();
         while let Some(batch_result) = block_on(stream.next()) {
             let batch = batch_result.with_context(|| "failed to read file_proofs batch")?;
-            let col_sid = batch.column_by_name("snapshot_id").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_fp = batch.column_by_name("file_path").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_hash = batch.column_by_name("content_hash").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::StringArray>()
-                    .unwrap()
-            });
-            let col_sz = batch.column_by_name("size_bytes").map(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::UInt64Array>()
-                    .unwrap()
-            });
+            let col_sid = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "snapshot_id",
+            )?);
+            let col_fp = Some(column_as::<arrow::array::StringArray>(&batch, "file_path")?);
+            let col_hash = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "content_hash",
+            )?);
+            let col_sz = Some(column_as::<arrow::array::UInt64Array>(
+                &batch,
+                "size_bytes",
+            )?);
             if let (Some(sid), Some(fp), Some(hash), Some(sz)) = (col_sid, col_fp, col_hash, col_sz)
             {
                 for i in 0..batch.num_rows() {
@@ -767,8 +707,10 @@ impl LanceDbStore {
                     path: row.file_path,
                     language: row.language,
                     size: row.size_bytes,
-                    mtime_ms: (row.mtime_ns as i128 / 1_000_000) as u128,
-                    hash: proof.map(|p| p.content_hash.clone()).unwrap_or_default(),
+                    mtime_ms: (row.mtime_ns / 1_000_000) as u128,
+                    hash: proof
+                        .map(|p| p.content_hash.clone())
+                        .unwrap_or_else(|| "blake3:missing_proof".to_string()),
                 }
             })
             .collect())
@@ -799,7 +741,7 @@ fn file_catalog_schema() -> SchemaRef {
         Field::new("file_path", DataType::Utf8, false),
         Field::new("language", DataType::Utf8, false),
         Field::new("size_bytes", DataType::UInt64, false),
-        Field::new("mtime_ns", DataType::Int64, false),
+        Field::new("mtime_ns", DataType::UInt64, false),
         Field::new("mode", DataType::UInt32, false),
         Field::new("is_binary", DataType::Boolean, false),
         Field::new("is_ignored", DataType::Boolean, false),
@@ -891,7 +833,7 @@ pub struct FileCatalogRow {
     pub file_path: String,
     pub language: String,
     pub size_bytes: u64,
-    pub mtime_ns: i64,
+    pub mtime_ns: u64,
 }
 
 pub struct FileProofRow {
@@ -904,7 +846,22 @@ pub struct FileProofRow {
 }
 
 pub fn is_available(workspace_root: &Path) -> bool {
-    lancedb_root(workspace_root).exists()
+    let root = lancedb_root(workspace_root);
+    if !root.is_dir() {
+        return false;
+    }
+    // Verify the database is connectable (not just directory exists)
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return false,
+    };
+    match rt.block_on(connect(&root.display().to_string()).execute()) {
+        Ok(db) => match rt.block_on(db.table_names().execute()) {
+            Ok(tables) => !tables.is_empty(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

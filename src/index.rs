@@ -85,12 +85,14 @@ pub fn build(
         created_at_epoch_ms: now_ms(),
     };
 
-    write_to_lancedb(workspace, &manifest, &records, staged)?;
-
-    // Write active manifest for pack/unpack compatibility
+    // Write compat manifest BEFORE LanceDB — if LanceDB fails,
+    // we still have a valid manifest.json for legacy fallback
     let active_dir = active_dir(workspace, staged);
     fs::create_dir_all(&active_dir)?;
     write_manifest(&active_dir.join("manifest.json"), &manifest)?;
+
+    write_to_lancedb(workspace, &manifest, &records, staged)
+        .with_context(|| format!("LanceDB write failed for snapshot {}. Run 'code-search index build --force' to rebuild.", manifest.snapshot_id))?;
 
     // Build call graph (best-effort; non-fatal on failure)
     if !staged {
