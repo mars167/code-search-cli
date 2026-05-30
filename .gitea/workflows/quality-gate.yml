@@ -24,7 +24,7 @@ jobs:
       - name: Install runner tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates nodejs
+          apt-get install -y --no-install-recommends git ca-certificates nodejs protobuf-compiler cmake
           rustup component add rustfmt
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
       - name: Install runner tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates jq nodejs
+          apt-get install -y --no-install-recommends git ca-certificates jq nodejs protobuf-compiler cmake
           rustup component add rustfmt
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
       - name: Install runner tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates jq bc hyperfine nodejs
+          apt-get install -y --no-install-recommends git ca-certificates jq bc hyperfine nodejs protobuf-compiler cmake
           rustup component add rustfmt
       - name: Checkout
         uses: actions/checkout@v4
