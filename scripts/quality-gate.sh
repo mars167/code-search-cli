@@ -94,7 +94,7 @@ run_quick() {
   cd "$ROOT"
   run_step "cargo fmt --check" cargo fmt --check
   run_step "cargo check" cargo check
-  run_step "cargo test" cargo test
+  run_step "cargo test --lib" cargo test --lib
   run_step "git diff --check" git diff --check
 }
 
@@ -141,7 +141,7 @@ run_ruoyi_smoke() {
 run_cli() {
   note "cli quality gate"
   cd "$ROOT"
-  run_step "cargo build --release" cargo build --release
+  run_step "cargo build --release" cargo build --release --bin code-search
   run_step "cargo test --test cli" cargo test --test cli
   run_ruoyi_smoke
 }
@@ -152,7 +152,10 @@ run_bench() {
   require_tool hyperfine
   require_tool jq
   require_tool bc
-  run_step "cargo build --release" cargo build --release
+  # Reuse release binary if already built (e.g. from 'full' gate)
+  if [[ ! -x "$CS_BIN" ]]; then
+    run_step "cargo build --release" cargo build --release --bin code-search
+  fi
   if [[ ! -d "$TEST_REPO" ]]; then
     skip "benchmark fixture repo not found: $TEST_REPO"
     return 0
