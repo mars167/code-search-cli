@@ -264,6 +264,30 @@ pub fn changed(workspace: &Workspace) -> Result<Value> {
     Ok(serde_json::to_value(&workspace.changed)?)
 }
 
+pub fn changed_summary(workspace: &Workspace) -> Value {
+    let staged_count = workspace.changed.iter().filter(|item| item.staged).count();
+    let unstaged_count = workspace
+        .changed
+        .iter()
+        .filter(|item| item.unstaged)
+        .count();
+    let untracked_count = workspace
+        .changed
+        .iter()
+        .filter(|item| item.untracked)
+        .count();
+    json!({
+        "base": &workspace.head,
+        "head": &workspace.head,
+        "worktree": &workspace.snapshot_id,
+        "dirty": workspace.dirty,
+        "stagedCount": staged_count,
+        "unstagedCount": unstaged_count,
+        "untrackedCount": untracked_count,
+        "changedCount": workspace.changed.len()
+    })
+}
+
 pub fn status(workspace: &Workspace) -> Value {
     json!({
         "root": workspace.root,

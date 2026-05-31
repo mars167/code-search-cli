@@ -26,6 +26,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
     }
 
     let workspace = Workspace::discover(&cli.path)?;
+    let scope_warnings = scope_warnings(&workspace, &scan_opts);
 
     let value = match &cli.command {
         Command::Find { text, mode } => {
@@ -41,7 +42,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::source_fact(),
                     query_output.index.clone(),
                     query_output.results.clone(),
-                    Vec::new(),
+                    scope_warnings.clone(),
                 ),
                 query_output,
             )
@@ -66,7 +67,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::source_fact(),
                     query_output.index.clone(),
                     query_output.results.clone(),
-                    Vec::new(),
+                    scope_warnings.clone(),
                 ),
                 query_output,
             )
@@ -86,7 +87,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::source_fact(),
                     query_output.index.clone(),
                     query_output.results.clone(),
-                    Vec::new(),
+                    scope_warnings.clone(),
                 ),
                 query_output,
             )
@@ -106,7 +107,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::source_fact(),
                     query_output.index.clone(),
                     query_output.results.clone(),
-                    Vec::new(),
+                    scope_warnings.clone(),
                 ),
                 query_output,
             )
@@ -126,7 +127,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::source_fact(),
                     query_output.index.clone(),
                     query_output.results.clone(),
-                    Vec::new(),
+                    scope_warnings.clone(),
                 ),
                 query_output,
             )
@@ -193,7 +194,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         output::precise_fact(),
                         precise.index,
                         precise.results,
-                        Vec::new(),
+                        scope_warnings.clone(),
                     ),
                     &workspace.root,
                 );
@@ -215,7 +216,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 output::source_fact(),
                 query_output.index.clone(),
                 query_output.results.clone(),
-                vec!["refs is identifier-boundary text search unless a precise occurrence index is available".to_string()],
+                merge_warnings(
+                    vec!["refs is identifier-boundary text search unless a precise occurrence index is available".to_string()],
+                    scope_warnings.clone(),
+                ),
             ), query_output)
         }
         Command::Symbols { query } => {
@@ -238,7 +242,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                             output::precise_fact(),
                             precise.index,
                             page.results.clone(),
-                            Vec::new(),
+                            scope_warnings.clone(),
                         ),
                         page.truncated,
                         page.next_cursor,
@@ -267,7 +271,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     &workspace.snapshot_id,
                     output::parser_fact(),
                     page.results.clone(),
-                    warnings,
+                    merge_warnings(warnings, scope_warnings.clone()),
                 ),
                 page.truncated,
                 page.next_cursor,
@@ -289,7 +293,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         output::precise_fact(),
                         precise.index,
                         precise.results,
-                        Vec::new(),
+                        scope_warnings.clone(),
                     ),
                     &workspace.root,
                 );
@@ -306,7 +310,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 &workspace.snapshot_id,
                 output::parser_fact(),
                 results,
-                warnings,
+                merge_warnings(warnings, scope_warnings.clone()),
             )
         }
         Command::Calls { identifier } => {
@@ -383,14 +387,18 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 warnings,
             )
         }
-        Command::Changed => output::response(
+        Command::Changed => output::with_summary_field(
+            output::response(
+                "changed",
+                "changed",
+                json!({}),
+                &workspace.snapshot_id,
+                output::source_fact(),
+                search::changed(&workspace)?,
+                Vec::new(),
+            ),
             "changed",
-            "changed",
-            json!({}),
-            &workspace.snapshot_id,
-            output::source_fact(),
-            search::changed(&workspace)?,
-            Vec::new(),
+            search::changed_summary(&workspace),
         ),
         Command::Status => output::response(
             "status",
@@ -621,4 +629,17 @@ fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {
         object.insert("scope".to_string(), search::scope_value(opts));
     }
     query
+}
+
+fn scope_warnings(workspace: &Workspace, opts: &ScanOptions) -> Vec<String> {
+    if opts.changed && workspace.changed.is_empty() {
+        vec!["changed scope is empty; no full-workspace fallback was used".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn merge_warnings(mut first: Vec<String>, second: Vec<String>) -> Vec<String> {
+    first.extend(second);
+    first
 }

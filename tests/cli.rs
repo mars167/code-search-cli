@@ -437,6 +437,146 @@ fn changed_scope_searches_only_git_changed_files() {
 }
 
 #[test]
+fn changed_output_distinguishes_staged_unstaged_and_untracked() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("src/staged.rs"), "old staged\n").unwrap();
+    fs::write(dir.path().join("src/unstaged.rs"), "old unstaged\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    fs::write(dir.path().join("src/staged.rs"), "new staged\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src/staged.rs"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("src/unstaged.rs"), "new unstaged\n").unwrap();
+    fs::write(dir.path().join("src/untracked.rs"), "new untracked\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["changed"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let results = json["results"].as_array().unwrap();
+    let staged = results
+        .iter()
+        .find(|result| result["path"] == "src/staged.rs")
+        .unwrap();
+    let unstaged = results
+        .iter()
+        .find(|result| result["path"] == "src/unstaged.rs")
+        .unwrap();
+    let untracked = results
+        .iter()
+        .find(|result| result["path"] == "src/untracked.rs")
+        .unwrap();
+
+    assert_eq!(staged["changeKind"], "staged");
+    assert_eq!(staged["staged"], true);
+    assert_eq!(unstaged["changeKind"], "unstaged");
+    assert_eq!(unstaged["unstaged"], true);
+    assert_eq!(untracked["changeKind"], "untracked");
+    assert_eq!(untracked["untracked"], true);
+    assert_eq!(json["summary"]["changed"]["stagedCount"], 1);
+    assert_eq!(json["summary"]["changed"]["unstagedCount"], 1);
+    assert_eq!(json["summary"]["changed"]["untrackedCount"], 1);
+    assert!(json["summary"]["changed"]["head"].as_str().is_some());
+    assert!(json["summary"]["changed"]["worktree"]
+        .as_str()
+        .unwrap()
+        .starts_with("worktree:"));
+}
+
+#[test]
+fn empty_changed_scope_returns_noop_warning_without_full_workspace_fallback() {
+    let dir = tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("clean.rs"), "needle\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "clean.rs"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--changed")
+        .args(["find", "needle"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["query"]["scope"]["changed"], true);
+    assert!(json["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        json["warnings"][0]["code"],
+        "changed_scope_is_empty_no_full_workspace_fallback_was_used"
+    );
+}
+
+#[test]
 fn cursor_paginates_stably_and_reports_facets() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();

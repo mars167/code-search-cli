@@ -51,6 +51,10 @@ pub struct ChangedFile {
     pub path: String,
     pub index_status: String,
     pub worktree_status: String,
+    pub change_kind: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +308,19 @@ pub fn git_status(root: &Path) -> Result<Vec<ChangedFile>> {
         }
         let index_status = line[0..1].to_string();
         let worktree_status = line[1..2].to_string();
+        let untracked = index_status == "?";
+        let staged = index_status != " " && index_status != "?";
+        let unstaged = !untracked && worktree_status != " ";
+        let change_kind = if untracked {
+            "untracked"
+        } else if staged && unstaged {
+            "staged_and_unstaged"
+        } else if staged {
+            "staged"
+        } else {
+            "unstaged"
+        }
+        .to_string();
         let path = line[3..]
             .rsplit_once(" -> ")
             .map(|(_, new_path)| new_path)
@@ -314,6 +331,10 @@ pub fn git_status(root: &Path) -> Result<Vec<ChangedFile>> {
             path,
             index_status,
             worktree_status,
+            change_kind,
+            staged,
+            unstaged,
+            untracked,
         });
     }
     Ok(changed)

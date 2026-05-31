@@ -146,6 +146,13 @@ pub fn with_page_meta(
     value
 }
 
+pub fn with_summary_field(mut value: Value, field: &str, field_value: Value) -> Value {
+    if let Some(summary) = value.get_mut("summary").and_then(Value::as_object_mut) {
+        summary.insert(field.to_string(), field_value);
+    }
+    value
+}
+
 fn live_scan_index() -> Value {
     json!({
         "used": false,
