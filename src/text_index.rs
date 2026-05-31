@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::File,
-    io::{Read, Seek, SeekFrom},
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -11,6 +11,60 @@ use crate::workspace::FileRecord;
 
 const DOCS_MAGIC: &[u8; 8] = b"CSDOCS1\0";
 const GRAMS_MAGIC: &[u8; 8] = b"CSGRAM1\0";
+
+pub fn write_docs(path: &Path, records: &[FileRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(DOCS_MAGIC)?;
+    write_u32(&mut file, records.len() as u32)?;
+    for record in records {
+        write_string(&mut file, &record.path)?;
+        write_string(&mut file, &record.language)?;
+        write_u64(&mut file, record.size)?;
+        write_u128(&mut file, record.mtime_ms)?;
+        write_string(&mut file, &record.hash)?;
+    }
+    Ok(())
+}
+
+pub fn write_grams(path: &Path, root: &Path, records: &[FileRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut gram_index: BTreeMap<[u8; 3], Vec<u32>> = BTreeMap::new();
+    for (doc_id, record) in records.iter().enumerate() {
+        let bytes = match fs::read(root.join(&record.path)) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        for window in bytes.windows(3) {
+            gram_index
+                .entry([window[0], window[1], window[2]])
+                .or_default()
+                .push(doc_id as u32);
+        }
+    }
+    for ids in gram_index.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+    }
+
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(GRAMS_MAGIC)?;
+    write_u32(&mut file, gram_index.len() as u32)?;
+    for (gram, ids) in gram_index {
+        file.write_all(&gram)?;
+        write_u32(&mut file, ids.len() as u32)?;
+        for id in ids {
+            write_u32(&mut file, id)?;
+        }
+    }
+    Ok(())
+}
 
 pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
     let mut file =
@@ -136,4 +190,74 @@ fn read_u128(file: &mut File) -> Result<u128> {
     let mut bytes = [0u8; 16];
     file.read_exact(&mut bytes)?;
     Ok(u128::from_le_bytes(bytes))
+}
+
+fn write_string(file: &mut File, value: &str) -> Result<()> {
+    write_u32(file, value.len() as u32)?;
+    file.write_all(value.as_bytes())?;
+    Ok(())
+}
+
+fn write_u32(file: &mut File, value: u32) -> Result<()> {
+    file.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_u64(file: &mut File, value: u64) -> Result<()> {
+    file.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+fn write_u128(file: &mut File, value: u128) -> Result<()> {
+    file.write_all(&value.to_le_bytes())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn docs_and_grams_round_trip() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "needle\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "haystack\n").unwrap();
+        let records = vec![
+            FileRecord {
+                path: "a.txt".to_string(),
+                language: "text".to_string(),
+                size: 7,
+                mtime_ms: 1,
+                mode: 0,
+                hash: "blake3:a".to_string(),
+            },
+            FileRecord {
+                path: "b.txt".to_string(),
+                language: "text".to_string(),
+                size: 9,
+                mtime_ms: 2,
+                mode: 0,
+                hash: "blake3:b".to_string(),
+            },
+        ];
+
+        let docs_path = dir.path().join("docs.idx");
+        let grams_path = dir.path().join("grams.idx");
+        write_docs(&docs_path, &records).unwrap();
+        write_grams(&grams_path, dir.path(), &records).unwrap();
+
+        let docs = read_docs(&docs_path).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0].path, "a.txt");
+
+        let ids = candidate_ids(&grams_path, "needle", "literal")
+            .unwrap()
+            .unwrap();
+        assert!(ids.contains(&0));
+        assert!(!ids.contains(&1));
+    }
 }

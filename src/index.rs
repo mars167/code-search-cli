@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -48,6 +48,24 @@ struct IndexScanOptions {
     lang: Vec<String>,
     #[serde(default)]
     changed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexedRecords {
+    pub records: Vec<FileRecord>,
+    pub index: Value,
+    pub indexed_paths: BTreeSet<String>,
+    pub overlay_paths: BTreeSet<String>,
+    pub stale_paths: BTreeSet<String>,
+    pub missing_paths: BTreeSet<String>,
+}
+
+struct LocalTextSnapshot {
+    manifest: Manifest,
+    records: Vec<FileRecord>,
+    text_path: PathBuf,
+    lancedb: bool,
+    freshness: Value,
 }
 
 pub fn build(
@@ -152,29 +170,40 @@ pub fn update(workspace: &Workspace, opts: &ScanOptions) -> Result<Value> {
 
 pub fn status(workspace: &Workspace) -> Result<Value> {
     let root = storage_root(workspace);
+    let manifest_path = active_manifest_path(workspace, false);
+    let active_manifest = manifest_path
+        .exists()
+        .then(|| read_manifest(&manifest_path))
+        .transpose()?;
 
     if lancedb_store::is_available(&workspace.root) {
         if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(&workspace.root) {
-            if let Ok(Some(snapshot)) = store.read_snapshot(&workspace.snapshot_id) {
-                if let Ok(records) = store.read_file_records(&workspace.snapshot_id) {
-                    let freshness = freshness(workspace, &records);
-                    let fresh = freshness
-                        .get("staleFiles")
-                        .and_then(Value::as_array)
-                        .map(|items| items.is_empty())
-                        .unwrap_or(false)
-                        && freshness
-                            .get("missingFiles")
-                            .and_then(Value::as_array)
-                            .map(|items| items.is_empty())
-                            .unwrap_or(false);
+            let snapshot_id = active_manifest
+                .as_ref()
+                .map(|manifest| manifest.snapshot_id.as_str())
+                .unwrap_or(&workspace.snapshot_id);
+            if let Ok(Some(snapshot)) = store.read_snapshot(snapshot_id) {
+                if let Ok(records) = store.read_file_records(snapshot_id) {
+                    let indexed_paths = records
+                        .iter()
+                        .map(|record| record.path.clone())
+                        .collect::<BTreeSet<_>>();
+                    let manifest = snapshot_row_to_manifest(&snapshot);
+                    let mut freshness = freshness(workspace, &records);
+                    let added_paths = added_paths_not_indexed(
+                        workspace,
+                        &scan_options_from_index_scan(&manifest.scan_options),
+                        &indexed_paths,
+                    )?;
+                    attach_added_files(&mut freshness, &added_paths);
+                    let fresh = freshness_is_clean(&freshness);
                     return Ok(json!({
                         "exists": true,
                         "fresh": fresh,
                         "path": root,
                         "snapshotPath": lancedb_store::lancedb_root(&workspace.root),
                         "textPath": text_dir(workspace, &snapshot.snapshot_key),
-                        "manifest": snapshot_row_to_manifest(&snapshot),
+                        "manifest": manifest,
                         "freshness": freshness
                     }));
                 }
@@ -182,8 +211,7 @@ pub fn status(workspace: &Workspace) -> Result<Value> {
         }
     }
 
-    let manifest_path = active_manifest_path(workspace, false);
-    if !manifest_path.exists() {
+    let Some(manifest) = active_manifest else {
         let remote = remote_status(workspace)?;
         let mut result = json!({
             "exists": false,
@@ -195,8 +223,7 @@ pub fn status(workspace: &Workspace) -> Result<Value> {
             result["remote"] = remote;
         }
         return Ok(result);
-    }
-    let manifest = read_manifest(&manifest_path)?;
+    };
     let snapshot_path = snapshot_dir(workspace, &manifest.snapshot_key);
     let text_path = text_dir(workspace, &manifest.snapshot_key);
     let snap_fresh = snapshot_store::verify_snapshot(&snapshot_path, &workspace.root)?;
@@ -226,23 +253,14 @@ pub fn fresh_file_records(
     workspace: &Workspace,
     opts: &ScanOptions,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
-    // Try local fresh snapshot first
-    let Some((manifest, records, text_path, _lancedb)) = fresh_text_snapshot(workspace, opts)?
-    else {
-        // Fall back to remote snapshots
-        return remote_fallback_text_records(workspace, None);
-    };
-
-    Ok(Some((
-        records,
-        text_index_meta(
-            &manifest,
-            text_path,
-            None,
-            None,
-            Some(workspace.scan_summary(opts)?),
-        ),
-    )))
+    Ok(indexed_file_records(workspace, opts)?.and_then(|indexed| {
+        indexed
+            .index
+            .get("fresh")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .then_some((indexed.records, indexed.index))
+    }))
 }
 
 pub fn fresh_text_records(
@@ -251,47 +269,78 @@ pub fn fresh_text_records(
     pattern: &str,
     mode: &str,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
-    // Try local fresh snapshot first
-    let Some((manifest, records, text_path, lancedb)) = fresh_text_snapshot(workspace, opts)?
-    else {
-        // Fall back to remote snapshots with trigram prefilter
-        return remote_fallback_text_records(workspace, Some((pattern, mode)));
+    Ok(
+        indexed_text_records(workspace, opts, pattern, mode)?.and_then(|indexed| {
+            indexed
+                .index
+                .get("fresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                .then_some((indexed.records, indexed.index))
+        }),
+    )
+}
+
+pub fn indexed_file_records(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+) -> Result<Option<IndexedRecords>> {
+    let Some(local) = local_text_snapshot(workspace, opts)? else {
+        return Ok(
+            remote_fallback_text_records(workspace, opts, None)?.map(|(records, index)| {
+                IndexedRecords {
+                    indexed_paths: records.iter().map(|record| record.path.clone()).collect(),
+                    records,
+                    index,
+                    overlay_paths: BTreeSet::new(),
+                    stale_paths: BTreeSet::new(),
+                    missing_paths: BTreeSet::new(),
+                }
+            }),
+        );
     };
 
-    let candidate_ids = if lancedb {
-        lancedb_candidate_ids(workspace, &manifest.snapshot_id, pattern, mode).unwrap_or(None)
-    } else {
-        text_index::candidate_ids(&text_path.join("grams.idx"), pattern, mode).unwrap_or(None)
-    };
-    let filtered = match &candidate_ids {
-        Some(ids) => records
-            .into_iter()
-            .enumerate()
-            .filter_map(|(doc_id, record)| ids.contains(&doc_id).then_some(record))
-            .collect::<Vec<_>>(),
-        None => records,
-    };
-    let prefilter = candidate_ids.as_ref().map(|_| "trigram");
-    let candidate_count = candidate_ids.as_ref().map(|ids| ids.len());
+    indexed_records_from_local(workspace, opts, local, None)
+}
 
-    Ok(Some((
-        filtered,
-        text_index_meta(
-            &manifest,
-            text_path,
-            prefilter,
-            candidate_count,
-            Some(workspace.scan_summary(opts)?),
-        ),
-    )))
+pub fn indexed_text_records(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    pattern: &str,
+    mode: &str,
+) -> Result<Option<IndexedRecords>> {
+    let Some(local) = local_text_snapshot(workspace, opts)? else {
+        return Ok(
+            remote_fallback_text_records(workspace, opts, Some((pattern, mode)))?.map(
+                |(records, index)| IndexedRecords {
+                    indexed_paths: records.iter().map(|record| record.path.clone()).collect(),
+                    records,
+                    index,
+                    overlay_paths: BTreeSet::new(),
+                    stale_paths: BTreeSet::new(),
+                    missing_paths: BTreeSet::new(),
+                },
+            ),
+        );
+    };
+
+    indexed_records_from_local(workspace, opts, local, Some((pattern, mode)))
 }
 /// Fall back to remote snapshots when local text index is not fresh or missing.
 fn remote_fallback_text_records(
     workspace: &Workspace,
+    opts: &ScanOptions,
     filter: Option<(&str, &str)>,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
     let remote_snapshots = discover_remote_snapshots(workspace)?;
     for (snapshot_key, remote_dir) in &remote_snapshots {
+        let manifest = match read_manifest(&remote_dir.join("manifest.json")) {
+            Ok(manifest) => manifest,
+            Err(_) => continue,
+        };
+        if manifest.scan_options != IndexScanOptions::from(opts) {
+            continue;
+        }
         let text_dir = remote_text_dir(workspace, snapshot_key);
         let docs_path = text_dir.join("docs.idx");
         if !docs_path.exists() {
@@ -581,43 +630,10 @@ pub(crate) fn snapshot_key(snapshot_id: &str) -> String {
         .collect()
 }
 
-fn fresh_text_snapshot(
+fn local_text_snapshot(
     workspace: &Workspace,
     opts: &ScanOptions,
-) -> Result<Option<(Manifest, Vec<FileRecord>, PathBuf, bool)>> {
-    if lancedb_store::is_available(&workspace.root) {
-        if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(&workspace.root) {
-            if let Ok(Some(snapshot)) = store.read_snapshot(&workspace.snapshot_id) {
-                if snapshot.source == "working_tree" {
-                    if let Ok(scan_opts) =
-                        serde_json::from_str::<IndexScanOptions>(&snapshot.scan_options_json)
-                    {
-                        if scan_opts == IndexScanOptions::from(opts) {
-                            if let Ok(records) = store.read_file_records(&workspace.snapshot_id) {
-                                let freshness = freshness(workspace, &records);
-                                let fresh = freshness
-                                    .get("staleFiles")
-                                    .and_then(Value::as_array)
-                                    .map(|items| items.is_empty())
-                                    .unwrap_or(false)
-                                    && freshness
-                                        .get("missingFiles")
-                                        .and_then(Value::as_array)
-                                        .map(|items| items.is_empty())
-                                        .unwrap_or(false);
-                                if fresh {
-                                    let manifest = snapshot_row_to_manifest(&snapshot);
-                                    let text_path = text_dir(workspace, &snapshot.snapshot_key);
-                                    return Ok(Some((manifest, records, text_path, true)));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+) -> Result<Option<LocalTextSnapshot>> {
     let manifest_path = active_manifest_path(workspace, false);
     if !manifest_path.exists() {
         return Ok(None);
@@ -628,15 +644,218 @@ fn fresh_text_snapshot(
         return Ok(None);
     }
 
-    let snapshot_path = snapshot_dir(workspace, &manifest.snapshot_key);
     let text_path = text_dir(workspace, &manifest.snapshot_key);
-    let records = snapshot_store::read_files_parquet(&snapshot_path.join("files.parquet"))?;
-    let snap_fresh = snapshot_store::verify_snapshot(&snapshot_path, &workspace.root)?;
-    if !snap_fresh.stale_files.is_empty() || !snap_fresh.missing_files.is_empty() {
-        return Ok(None);
+    if lancedb_store::is_available(&workspace.root) {
+        if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(&workspace.root) {
+            if let Ok(Some(snapshot)) = store.read_snapshot(&manifest.snapshot_id) {
+                if snapshot.source == "working_tree" {
+                    if let Ok(scan_opts) =
+                        serde_json::from_str::<IndexScanOptions>(&snapshot.scan_options_json)
+                    {
+                        if scan_opts == IndexScanOptions::from(opts) {
+                            if let Ok(records) = store.read_file_records(&manifest.snapshot_id) {
+                                return Ok(Some(LocalTextSnapshot {
+                                    manifest: snapshot_row_to_manifest(&snapshot),
+                                    freshness: freshness(workspace, &records),
+                                    records,
+                                    text_path,
+                                    lancedb: true,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    Ok(Some((manifest, records, text_path, false)))
+    let snapshot_path = snapshot_dir(workspace, &manifest.snapshot_key);
+    let files_path = snapshot_path.join("files.parquet");
+    if !files_path.exists() {
+        return Ok(None);
+    }
+    let records = snapshot_store::read_files_parquet(&files_path)?;
+    let snap_fresh = snapshot_store::verify_snapshot(&snapshot_path, &workspace.root)?;
+    let freshness = json!({
+        "freshCount": snap_fresh.fresh_count,
+        "staleFiles": snap_fresh.stale_files,
+        "missingFiles": snap_fresh.missing_files
+    });
+    Ok(Some(LocalTextSnapshot {
+        manifest,
+        records,
+        text_path,
+        lancedb: false,
+        freshness,
+    }))
+}
+
+fn indexed_records_from_local(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    local: LocalTextSnapshot,
+    filter: Option<(&str, &str)>,
+) -> Result<Option<IndexedRecords>> {
+    let mut freshness = local.freshness;
+    let stale_paths = freshness_paths(&freshness, "staleFiles");
+    let missing_paths = freshness_paths(&freshness, "missingFiles");
+    let indexed_paths = local
+        .records
+        .iter()
+        .map(|record| record.path.clone())
+        .collect::<BTreeSet<_>>();
+    let added_paths = added_paths_not_indexed(workspace, opts, &indexed_paths)?;
+    attach_added_files(&mut freshness, &added_paths);
+    let mut overlay_paths = stale_paths.clone();
+    overlay_paths.extend(added_paths.iter().cloned());
+    let fresh = stale_paths.is_empty() && missing_paths.is_empty() && added_paths.is_empty();
+
+    let mut candidate_ids = None;
+    let mut prefilter = None;
+    let mut prefilter_reason = None;
+    if let Some((pattern, mode)) = filter {
+        candidate_ids = if local.lancedb {
+            lancedb_candidate_ids(workspace, &local.manifest.snapshot_id, pattern, mode)
+                .unwrap_or(None)
+        } else {
+            text_index::candidate_ids(&local.text_path.join("grams.idx"), pattern, mode)
+                .unwrap_or(None)
+        };
+        if candidate_ids.is_some() {
+            prefilter = Some("trigram");
+        } else {
+            prefilter = Some("none");
+            prefilter_reason = Some(prefilter_unavailable_reason(pattern, mode));
+        }
+    }
+
+    let mut records = Vec::new();
+    for (doc_id, record) in local.records.into_iter().enumerate() {
+        if candidate_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&doc_id))
+        {
+            continue;
+        }
+        if stale_paths.contains(&record.path) || missing_paths.contains(&record.path) {
+            continue;
+        }
+        records.push(record);
+    }
+    let candidate_count = candidate_ids.as_ref().map(|_| records.len());
+
+    let mut index = text_index_meta(
+        &local.manifest,
+        local.text_path,
+        prefilter,
+        candidate_count,
+        Some(workspace.scan_summary(opts)?),
+    );
+    if let Some(reason) = prefilter_reason {
+        index["prefilterReason"] = json!(reason);
+    }
+    if !fresh {
+        index["fresh"] = json!(false);
+        index["fallback"] = json!(true);
+        index["reason"] = json!("partial_live_overlay");
+        index["freshness"] = freshness;
+        index["staleCount"] = json!(stale_paths.len());
+        index["missingCount"] = json!(missing_paths.len());
+        index["addedCount"] = json!(added_paths.len());
+    }
+
+    Ok(Some(IndexedRecords {
+        records,
+        index,
+        indexed_paths,
+        overlay_paths,
+        stale_paths,
+        missing_paths,
+    }))
+}
+
+fn freshness_is_clean(freshness: &Value) -> bool {
+    freshness
+        .get("staleFiles")
+        .and_then(Value::as_array)
+        .map(|items| items.is_empty())
+        .unwrap_or(false)
+        && freshness
+            .get("missingFiles")
+            .and_then(Value::as_array)
+            .map(|items| items.is_empty())
+            .unwrap_or(false)
+        && freshness
+            .get("addedFiles")
+            .and_then(Value::as_array)
+            .map(|items| items.is_empty())
+            .unwrap_or(true)
+}
+
+fn freshness_paths(freshness: &Value, field: &str) -> BTreeSet<String> {
+    freshness
+        .get(field)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.get("path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
+fn added_paths_not_indexed(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    indexed_paths: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut scan_opts = opts.clone();
+    scan_opts.limit = 0;
+    scan_opts.changed = false;
+    Ok(workspace
+        .scan_catalog(&scan_opts)?
+        .into_iter()
+        .map(|record| record.path)
+        .filter(|path| !indexed_paths.contains(path))
+        .collect())
+}
+
+fn scan_options_from_index_scan(scan_options: &IndexScanOptions) -> ScanOptions {
+    ScanOptions {
+        include: scan_options.include.clone(),
+        exclude: scan_options.exclude.clone(),
+        hidden: scan_options.hidden,
+        no_ignore: scan_options.no_ignore,
+        lang: scan_options.lang.clone(),
+        changed: false,
+        cursor: None,
+        allow_broad: false,
+        limit: 0,
+    }
+}
+
+fn attach_added_files(freshness: &mut Value, added_paths: &BTreeSet<String>) {
+    if added_paths.is_empty() {
+        return;
+    }
+    freshness["addedFiles"] = Value::Array(
+        added_paths
+            .iter()
+            .map(|path| json!({ "path": path, "reason": "not_in_index" }))
+            .collect(),
+    );
+}
+
+fn prefilter_unavailable_reason(pattern: &str, mode: &str) -> &'static str {
+    if mode != "literal" {
+        "regex_prefilter_not_supported"
+    } else if pattern.as_bytes().len() < 3 {
+        "literal_shorter_than_trigram"
+    } else {
+        "trigram_prefilter_unavailable"
+    }
 }
 
 fn text_index_meta(
@@ -812,6 +1031,9 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
     let graph_d = graph::graph_dir(workspace);
 
     let mut entries: Vec<ArchiveEntry> = Vec::new();
+    let lancedb_records = lancedb_store::LanceDbStore::open_or_create(&workspace.root)
+        .ok()
+        .and_then(|store| store.read_file_records(&manifest.snapshot_id).ok());
 
     // Top-level pack manifest
     let pack_manifest = json!({
@@ -825,6 +1047,7 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
         "head": manifest.head,
         "dirty": manifest.dirty,
         "fileCount": manifest.file_count,
+        "scanOptions": manifest.scan_options.clone(),
     });
     let pack_manifest_bytes = serde_json::to_vec_pretty(&pack_manifest)?;
     entries.push(ArchiveEntry {
@@ -840,6 +1063,15 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
             name: "files.parquet".to_string(),
             content,
         });
+    } else if let Some(records) = &lancedb_records {
+        let tmp = pack_temp_dir(workspace, "files")?;
+        let parquet_path = tmp.join("files.parquet");
+        snapshot_store::write_files_parquet(&parquet_path, records)?;
+        entries.push(ArchiveEntry {
+            name: "files.parquet".to_string(),
+            content: fs::read(parquet_path)?,
+        });
+        let _ = fs::remove_dir_all(tmp);
     }
 
     // text index segments
@@ -849,6 +1081,30 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
             let rel = format!("text/{seg_name}");
             let content = fs::read(&seg_path)?;
             entries.push(ArchiveEntry { name: rel, content });
+        }
+    }
+    let has_docs = entries.iter().any(|entry| entry.name == "text/docs.idx");
+    let has_grams = entries.iter().any(|entry| entry.name == "text/grams.idx");
+    if let Some(records) = &lancedb_records {
+        if !has_docs || !has_grams {
+            let tmp = pack_temp_dir(workspace, "text")?;
+            if !has_docs {
+                let docs_path = tmp.join("docs.idx");
+                text_index::write_docs(&docs_path, records)?;
+                entries.push(ArchiveEntry {
+                    name: "text/docs.idx".to_string(),
+                    content: fs::read(docs_path)?,
+                });
+            }
+            if !has_grams {
+                let grams_path = tmp.join("grams.idx");
+                text_index::write_grams(&grams_path, &workspace.root, records)?;
+                entries.push(ArchiveEntry {
+                    name: "text/grams.idx".to_string(),
+                    content: fs::read(grams_path)?,
+                });
+            }
+            let _ = fs::remove_dir_all(tmp);
         }
     }
 
@@ -979,6 +1235,19 @@ pub fn unpack(workspace: &Workspace, archive_path: &str) -> Result<Value> {
         .ok_or_else(|| anyhow!("pack manifest missing snapshot_id"))?
         .to_string();
     let snapshot_key = snapshot_key(&snapshot_id);
+    let scan_options = pack_manifest
+        .get("scanOptions")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_else(|| IndexScanOptions {
+            include: Vec::new(),
+            exclude: Vec::new(),
+            hidden: false,
+            no_ignore: false,
+            lang: Vec::new(),
+            changed: false,
+        });
 
     // Determine remote target directory: .code-search/remote/<snapshot_key>/
     let remote_dir = remote_dir(workspace, &snapshot_key);
@@ -1018,6 +1287,7 @@ pub fn unpack(workspace: &Workspace, archive_path: &str) -> Result<Value> {
         "originalHead": pack_manifest.get("head"),
         "originalDirty": pack_manifest.get("dirty"),
         "fileCount": pack_manifest.get("fileCount"),
+        "scanOptions": scan_options.clone(),
         "toolVersion": pack_manifest.get("toolVersion"),
         "warning": "This is a remote-imported snapshot. It does NOT represent local working/staged state."
     });
@@ -1034,14 +1304,7 @@ pub fn unpack(workspace: &Workspace, archive_path: &str) -> Result<Value> {
             head: pack_manifest["head"].as_str().map(|s| s.to_string()),
             dirty: pack_manifest["dirty"].as_bool().unwrap_or(false),
             file_count: pack_manifest["fileCount"].as_u64().unwrap_or(0) as usize,
-            scan_options: IndexScanOptions {
-                include: Vec::new(),
-                exclude: Vec::new(),
-                hidden: false,
-                no_ignore: false,
-                lang: Vec::new(),
-                changed: false,
-            },
+            scan_options,
             created_at_epoch_ms: now_ms(),
         },
     )?;
@@ -1165,6 +1428,16 @@ fn parse_checksums(checksums_str: &str) -> Result<std::collections::HashMap<Stri
     Ok(map)
 }
 
+fn pack_temp_dir(workspace: &Workspace, label: &str) -> Result<PathBuf> {
+    let dir = storage_root(workspace).join(format!(
+        ".pack-tmp-{label}-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 fn remote_root(workspace: &Workspace) -> PathBuf {
     storage_root(workspace).join("remote")
 }
@@ -1234,7 +1507,7 @@ fn write_to_lancedb(
         .with_context(|| "failed to write file catalog to LanceDB")?;
 
     lancedb
-        .write_file_proofs(&manifest.snapshot_id, records)
+        .write_file_proofs(&manifest.snapshot_id, records, Some(&workspace.root))
         .with_context(|| "failed to write file proofs to LanceDB")?;
 
     if !staged {

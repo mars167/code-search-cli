@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -100,7 +101,9 @@ pub fn files(
                 "language": file.language,
                 "size": file.size,
                 "hash": file.hash,
-                "producer": if source.index["used"].as_bool().unwrap_or(false) { "text_index_file_catalog" } else { "live_file_catalog" },
+                "producer": file.source.file_catalog_producer(),
+                "indexFresh": file.source.index_fresh(),
+                "sourceReason": file.source.reason(),
                 "reliability": "source_fact",
                 "exact": true
             }));
@@ -267,12 +270,12 @@ pub fn find(
 
     let source = candidate_text_files(workspace, opts, pattern, mode)?;
     let repository_files = source.records.len();
-    let repository_bytes = source.records.iter().map(|file| file.size).sum();
+    let repository_bytes = source.records.iter().map(|file| file.record.size).sum();
     let provisional_budget =
         output_budget(repository_files, repository_bytes, 0, opts.limit, context);
     let mut results = Vec::new();
     for file in source.records {
-        let path = workspace.abs_path(&file.path);
+        let path = workspace.abs_path(&file.record.path);
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,
             Err(_) => continue,
@@ -285,16 +288,18 @@ pub fn find(
             let (preview, preview_truncated) =
                 preview_line(&content, mat.start(), provisional_budget.max_preview_chars);
             results.push(json!({
-                "path": file.path,
+                "path": file.record.path,
                 "range": range,
                 "matchText": mat.as_str(),
                 "preview": preview,
                 "previewTruncated": preview_truncated,
                 "previewTruncatedReason": if preview_truncated { Value::String("output_budget_preview".to_string()) } else { Value::Null },
                 "context": context_lines(&content, range["start"]["line"].as_u64().unwrap_or(1) as usize, context, provisional_budget.max_preview_chars),
-                "fileHash": file.hash,
-                "language": file.language,
-                "producer": text_search_producer(refs_mode, source.index["used"].as_bool().unwrap_or(false)),
+                "fileHash": file.record.hash,
+                "language": file.record.language,
+                "producer": file.source.text_search_producer(refs_mode),
+                "indexFresh": file.source.index_fresh(),
+                "sourceReason": file.source.reason(),
                 "reliability": "source_fact",
                 "exact": true
             }));
@@ -956,7 +961,7 @@ fn count_facet(results: &[Value], value_for: impl Fn(&Value) -> Option<String>) 
 }
 
 struct CandidateFiles {
-    records: Vec<FileRecord>,
+    records: Vec<TextFileEntry>,
     index: Value,
 }
 
@@ -970,27 +975,103 @@ struct FileEntry {
     language: String,
     size: u64,
     hash: Option<String>,
+    source: CandidateSource,
 }
 
-impl From<FileRecord> for FileEntry {
-    fn from(record: FileRecord) -> Self {
+struct TextFileEntry {
+    record: FileRecord,
+    source: CandidateSource,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CandidateSource {
+    IndexedFresh,
+    IndexedUnverified,
+    LiveOverlay,
+    LiveScan,
+}
+
+impl CandidateSource {
+    fn file_catalog_producer(self) -> &'static str {
+        match self {
+            CandidateSource::IndexedFresh | CandidateSource::IndexedUnverified => {
+                "text_index_file_catalog"
+            }
+            CandidateSource::LiveOverlay | CandidateSource::LiveScan => "live_file_catalog",
+        }
+    }
+
+    fn text_search_producer(self, refs_mode: bool) -> &'static str {
+        match (refs_mode, self) {
+            (true, CandidateSource::IndexedFresh | CandidateSource::IndexedUnverified) => {
+                "text_index_identifier_boundary_search"
+            }
+            (true, CandidateSource::LiveOverlay | CandidateSource::LiveScan) => {
+                "identifier_boundary_text_search"
+            }
+            (false, CandidateSource::IndexedFresh | CandidateSource::IndexedUnverified) => {
+                "text_index_live_text_search"
+            }
+            (false, CandidateSource::LiveOverlay | CandidateSource::LiveScan) => "live_text_search",
+        }
+    }
+
+    fn index_fresh(self) -> bool {
+        matches!(self, CandidateSource::IndexedFresh)
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            CandidateSource::IndexedFresh => "indexed_fresh",
+            CandidateSource::IndexedUnverified => "indexed_unverified",
+            CandidateSource::LiveOverlay => "per_file_live_overlay",
+            CandidateSource::LiveScan => "live_scan",
+        }
+    }
+}
+
+impl FileEntry {
+    fn indexed(record: FileRecord, source: CandidateSource) -> Self {
         Self {
             path: record.path,
             language: record.language,
             size: record.size,
             hash: Some(record.hash),
+            source,
         }
     }
-}
 
-impl From<FileCatalogRecord> for FileEntry {
-    fn from(record: FileCatalogRecord) -> Self {
+    fn live(record: FileCatalogRecord, source: CandidateSource) -> Self {
         Self {
             path: record.path,
             language: record.language,
             size: record.size,
             hash: None,
+            source,
         }
+    }
+}
+
+impl TextFileEntry {
+    fn indexed(record: FileRecord, source: CandidateSource) -> Self {
+        Self { record, source }
+    }
+
+    fn live(record: FileRecord, source: CandidateSource) -> Self {
+        Self { record, source }
+    }
+}
+
+fn indexed_candidate_source(index: &Value) -> CandidateSource {
+    if index.get("source").and_then(Value::as_str) == Some("text_index:remote")
+        && !index
+            .get("remote_verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        CandidateSource::IndexedUnverified
+    } else {
+        CandidateSource::IndexedFresh
     }
 }
 
@@ -999,13 +1080,28 @@ fn candidate_file_catalog(
     opts: &ScanOptions,
 ) -> Result<CandidateFileCatalog> {
     if !opts.changed {
-        if let Some((records, index)) = index::fresh_file_records(workspace, opts)? {
-            return Ok(CandidateFileCatalog {
-                records: filter_file_entries(
-                    records.into_iter().map(FileEntry::from).collect(),
+        if let Some(indexed) = index::indexed_file_records(workspace, opts)? {
+            let indexed_source = indexed_candidate_source(&indexed.index);
+            let mut records = filter_file_entries(
+                indexed
+                    .records
+                    .into_iter()
+                    .map(|record| FileEntry::indexed(record, indexed_source))
+                    .collect(),
+                opts,
+            );
+            if !indexed.overlay_paths.is_empty() || !indexed.missing_paths.is_empty() {
+                records.extend(live_file_overlay(
+                    workspace,
                     opts,
-                ),
-                index,
+                    &indexed.indexed_paths,
+                    &indexed.overlay_paths,
+                )?);
+                records.sort_by(|a, b| a.path.cmp(&b.path));
+            }
+            return Ok(CandidateFileCatalog {
+                records,
+                index: indexed.index,
             });
         }
     }
@@ -1016,7 +1112,7 @@ fn candidate_file_catalog(
         records: workspace
             .scan_catalog(&scan_opts)?
             .into_iter()
-            .map(FileEntry::from)
+            .map(|record| FileEntry::live(record, CandidateSource::LiveScan))
             .collect(),
         index: live_scan_index_with_summary(workspace, &scan_opts)?,
     })
@@ -1029,10 +1125,24 @@ fn candidate_text_files(
     mode: &str,
 ) -> Result<CandidateFiles> {
     if !opts.changed {
-        if let Some((records, index)) = index::fresh_text_records(workspace, opts, pattern, mode)? {
+        if let Some(indexed) = index::indexed_text_records(workspace, opts, pattern, mode)? {
+            let indexed_source = indexed_candidate_source(&indexed.index);
+            let mut records = filter_records(indexed.records, opts)
+                .into_iter()
+                .map(|record| TextFileEntry::indexed(record, indexed_source))
+                .collect::<Vec<_>>();
+            if !indexed.overlay_paths.is_empty() || !indexed.missing_paths.is_empty() {
+                records.extend(live_text_overlay(
+                    workspace,
+                    opts,
+                    &indexed.indexed_paths,
+                    &indexed.overlay_paths,
+                )?);
+                records.sort_by(|a, b| a.record.path.cmp(&b.record.path));
+            }
             return Ok(CandidateFiles {
-                records: filter_records(records, opts),
-                index,
+                records,
+                index: indexed.index,
             });
         }
     }
@@ -1040,7 +1150,11 @@ fn candidate_text_files(
     let mut scan_opts = opts.clone();
     scan_opts.limit = 0;
     Ok(CandidateFiles {
-        records: workspace.scan_files(&scan_opts)?,
+        records: workspace
+            .scan_files(&scan_opts)?
+            .into_iter()
+            .map(|record| TextFileEntry::live(record, CandidateSource::LiveScan))
+            .collect(),
         index: live_scan_index_with_summary(workspace, &scan_opts)?,
     })
 }
@@ -1049,6 +1163,42 @@ fn live_scan_index_with_summary(workspace: &Workspace, opts: &ScanOptions) -> Re
     let mut index = index::live_scan_index_meta("index_missing_or_stale");
     index["scanSummary"] = workspace.scan_summary(opts)?;
     Ok(index)
+}
+
+fn live_file_overlay(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    indexed_paths: &BTreeSet<String>,
+    overlay_paths: &BTreeSet<String>,
+) -> Result<Vec<FileEntry>> {
+    let mut scan_opts = opts.clone();
+    scan_opts.limit = 0;
+    Ok(workspace
+        .scan_catalog(&scan_opts)?
+        .into_iter()
+        .filter(|record| {
+            overlay_paths.contains(&record.path) || !indexed_paths.contains(&record.path)
+        })
+        .map(|record| FileEntry::live(record, CandidateSource::LiveOverlay))
+        .collect())
+}
+
+fn live_text_overlay(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    indexed_paths: &BTreeSet<String>,
+    overlay_paths: &BTreeSet<String>,
+) -> Result<Vec<TextFileEntry>> {
+    let mut scan_opts = opts.clone();
+    scan_opts.limit = 0;
+    Ok(workspace
+        .scan_files(&scan_opts)?
+        .into_iter()
+        .filter(|record| {
+            overlay_paths.contains(&record.path) || !indexed_paths.contains(&record.path)
+        })
+        .map(|record| TextFileEntry::live(record, CandidateSource::LiveOverlay))
+        .collect())
 }
 
 fn filter_records(records: Vec<FileRecord>, opts: &ScanOptions) -> Vec<FileRecord> {
@@ -1085,15 +1235,6 @@ fn filter_file_entries(records: Vec<FileEntry>, opts: &ScanOptions) -> Vec<FileE
                 && matches_lang(&record.language, &opts.lang)
         })
         .collect()
-}
-
-fn text_search_producer(refs_mode: bool, index_used: bool) -> &'static str {
-    match (refs_mode, index_used) {
-        (true, true) => "text_index_identifier_boundary_search",
-        (true, false) => "identifier_boundary_text_search",
-        (false, true) => "text_index_live_text_search",
-        (false, false) => "live_text_search",
-    }
 }
 
 fn preview_line(content: &str, byte: usize, max_chars: usize) -> (String, bool) {

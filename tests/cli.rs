@@ -9,6 +9,26 @@ fn code_search() -> Command {
     Command::cargo_bin("code-search").expect("binary exists")
 }
 
+fn init_git_repo(path: &std::path::Path) {
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+}
+
 #[test]
 fn find_returns_reliable_source_fact() {
     let dir = tempdir().unwrap();
@@ -2057,12 +2077,72 @@ fn index_verify_detects_stale_files() {
 
     fs::write(dir.path().join("sample.txt"), "one\ntwo\n").unwrap();
 
-    code_search()
+    let output = code_search()
         .arg("--path")
         .arg(dir.path())
         .args(["index", "verify"])
         .assert()
-        .code(6);
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let stale = &json["results"][0]["freshness"]["staleFiles"][0];
+    assert_eq!(stale["path"], "sample.txt");
+    assert_eq!(stale["reason"], "file_hash_mismatch");
+}
+
+#[test]
+fn git_dirty_index_status_uses_active_manifest_for_per_file_freshness() {
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+    fs::write(dir.path().join("sample.txt"), "one\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "sample.txt"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("sample.txt"), "one\ntwo\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let status = &json["results"][0];
+    assert_eq!(status["exists"], true);
+    assert_eq!(status["fresh"], false);
+    assert_eq!(
+        status["manifest"]["snapshotId"]
+            .as_str()
+            .unwrap()
+            .starts_with("commit:"),
+        true
+    );
+    assert_eq!(
+        status["freshness"]["staleFiles"][0]["reason"],
+        "file_hash_mismatch"
+    );
 }
 
 #[test]
@@ -2133,6 +2213,202 @@ fn find_uses_fresh_text_index_for_candidates() {
 }
 
 #[test]
+fn path_queries_use_fresh_index_catalog() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(dir.path().join("README.md"), "hello\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let files_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["files", "main"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let files_json: Value = serde_json::from_slice(&files_output).unwrap();
+    assert_eq!(files_json["index"]["used"], true);
+    assert_eq!(files_json["index"]["fresh"], true);
+    assert_eq!(
+        files_json["results"][0]["producer"],
+        "text_index_file_catalog"
+    );
+    assert_eq!(files_json["results"][0]["sourceReason"], "indexed_fresh");
+
+    let glob_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["glob", "**/*.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let glob_json: Value = serde_json::from_slice(&glob_output).unwrap();
+    assert_eq!(glob_json["index"]["used"], true);
+    assert_eq!(glob_json["results"][0]["path"], "src/main.rs");
+    assert_eq!(
+        glob_json["results"][0]["producer"],
+        "text_index_file_catalog"
+    );
+}
+
+#[test]
+fn dirty_worktree_uses_index_for_fresh_files_and_live_overlay_for_changed_files() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    init_git_repo(dir.path());
+    fs::write(
+        dir.path().join("src/stable.rs"),
+        "fn stable() { /* needle */ }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("src/changed.rs"),
+        "fn changed() { /* needle old */ }\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    fs::write(
+        dir.path().join("src/changed.rs"),
+        "fn changed() { /* needle new */ }\n",
+    )
+    .unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["fresh"], false);
+    assert_eq!(json["index"]["fallback"], true);
+    assert_eq!(json["index"]["reason"], "partial_live_overlay");
+    assert_eq!(json["index"]["staleCount"], 1);
+
+    let results = json["results"].as_array().unwrap();
+    let stable = results
+        .iter()
+        .find(|result| result["path"] == "src/stable.rs")
+        .unwrap();
+    assert_eq!(stable["producer"], "text_index_live_text_search");
+    assert_eq!(stable["indexFresh"], true);
+    assert_eq!(stable["sourceReason"], "indexed_fresh");
+
+    let changed = results
+        .iter()
+        .find(|result| result["path"] == "src/changed.rs")
+        .unwrap();
+    assert_eq!(changed["producer"], "live_text_search");
+    assert_eq!(changed["indexFresh"], false);
+    assert_eq!(changed["sourceReason"], "per_file_live_overlay");
+    assert_eq!(changed["matchText"], "needle");
+}
+
+#[test]
+fn non_git_added_file_uses_live_overlay_after_index_build() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("stable.txt"), "needle stable\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("added.txt"), "needle added\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["fresh"], false);
+    assert_eq!(json["index"]["addedCount"], 1);
+    let added = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["path"] == "added.txt")
+        .unwrap();
+    assert_eq!(added["producer"], "live_text_search");
+    assert_eq!(added["sourceReason"], "per_file_live_overlay");
+}
+
+#[test]
+fn added_files_outside_index_scope_do_not_dirty_scoped_index() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("docs")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--include", "src", "index", "build"])
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("docs/new.md"), "outside scope\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let status = &json["results"][0];
+    assert_eq!(status["fresh"], true);
+    assert!(status["freshness"].get("addedFiles").is_none());
+}
+
+#[test]
 fn find_uses_lancedb_gram_prefilter_for_candidates() {
     let dir = tempdir().unwrap();
     fs::write(
@@ -2169,6 +2445,41 @@ fn find_uses_lancedb_gram_prefilter_for_candidates() {
     assert_eq!(json["index"]["prefilter"], "trigram");
     assert_eq!(json["index"]["candidateCount"], 1);
     assert_eq!(json["results"][0]["path"], "hit.txt");
+}
+
+#[test]
+fn regex_search_reports_prefilter_plan_when_using_index_catalog() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle_123\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["grep", "needle_[0-9]+"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["prefilter"], "none");
+    assert_eq!(
+        json["index"]["prefilterReason"],
+        "regex_prefilter_not_supported"
+    );
+    assert_eq!(
+        json["results"][0]["producer"],
+        "text_index_live_text_search"
+    );
 }
 
 #[test]
@@ -3383,6 +3694,9 @@ fn index_unpack_extracts_to_remote_dir_does_not_touch_working_or_staged() {
             if prov.exists() {
                 let prov_content = fs::read_to_string(&prov).unwrap();
                 assert!(prov_content.contains("remote_unpacked"));
+                assert!(path.join("files.parquet").exists());
+                assert!(path.join("text/docs.idx").exists());
+                assert!(path.join("text/grams.idx").exists());
                 return;
             }
         }
@@ -3508,9 +3822,85 @@ fn remote_query_is_used_when_local_is_clean_missing() {
 
     let json: Value = serde_json::from_slice(&find_output).unwrap();
     assert_eq!(json["ok"], true);
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["source"], "text_index:remote");
     // Should find the file even with local index deleted (via remote)
     assert!(!json["results"].as_array().unwrap().is_empty());
     assert_eq!(json["results"][0]["path"], "src/main.rs");
+}
+
+#[test]
+fn remote_fallback_respects_packed_scan_scope() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::create_dir_all(dir.path().join("docs")).unwrap();
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() { /* srctoken */ }\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("docs/guide.md"), "needle docs\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--include", "src", "index", "build"])
+        .assert()
+        .success();
+
+    let archive_path = dir.path().join("output.tar.gz");
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "pack", "--output"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "clean"])
+        .assert()
+        .success();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "unpack"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    let unscoped_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let unscoped_json: Value = serde_json::from_slice(&unscoped_output).unwrap();
+    assert_eq!(unscoped_json["index"]["used"], false);
+    assert_eq!(unscoped_json["results"][0]["path"], "docs/guide.md");
+
+    let scoped_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--include", "src", "find", "srctoken"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scoped_json: Value = serde_json::from_slice(&scoped_output).unwrap();
+    assert_eq!(scoped_json["index"]["used"], true);
+    assert_eq!(scoped_json["index"]["source"], "text_index:remote");
+    assert_eq!(scoped_json["results"][0]["path"], "src/main.rs");
 }
 
 #[test]
@@ -3587,7 +3977,24 @@ fn remote_mismatch_labels_results_as_unverified() {
             if let Some(first) = arr.first() {
                 // remoteVerified should be false since file hashes don't match
                 assert_eq!(first["remoteVerified"], json!(false));
-                return; // found and verified
+                let files_output = code_search()
+                    .arg("--path")
+                    .arg(dir.path())
+                    .args(["files", "main"])
+                    .assert()
+                    .success()
+                    .get_output()
+                    .stdout
+                    .clone();
+                let files_json: Value = serde_json::from_slice(&files_output).unwrap();
+                assert_eq!(files_json["index"]["source"], "text_index:remote");
+                assert_eq!(files_json["index"]["remote_verified"], false);
+                assert_eq!(files_json["results"][0]["indexFresh"], false);
+                assert_eq!(
+                    files_json["results"][0]["sourceReason"],
+                    "indexed_unverified"
+                );
+                return;
             }
         }
     }

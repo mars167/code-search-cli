@@ -271,6 +271,7 @@ impl LanceDbStore {
         &self,
         snapshot_id: &str,
         records: &[crate::workspace::FileRecord],
+        workspace_root: Option<&Path>,
     ) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -292,7 +293,8 @@ impl LanceDbStore {
             file_paths.push(r.path.clone());
             content_hashes.push(r.hash.clone());
             size_bytes.push(r.size);
-            line_offsets.push(None);
+            line_offsets
+                .push(workspace_root.and_then(|root| line_offsets_json(&root.join(&r.path)).ok()));
             blob_keys.push(r.hash.trim_start_matches("blake3:").to_string());
         }
 
@@ -696,7 +698,12 @@ impl LanceDbStore {
                 &batch,
                 "size_bytes",
             )?);
-            if let (Some(sid), Some(fp), Some(hash), Some(sz)) = (col_sid, col_fp, col_hash, col_sz)
+            let col_offsets = Some(column_as::<arrow::array::StringArray>(
+                &batch,
+                "line_offsets",
+            )?);
+            if let (Some(sid), Some(fp), Some(hash), Some(sz), Some(offsets)) =
+                (col_sid, col_fp, col_hash, col_sz, col_offsets)
             {
                 for i in 0..batch.num_rows() {
                     rows.push(FileProofRow {
@@ -704,6 +711,11 @@ impl LanceDbStore {
                         file_path: fp.value(i).to_string(),
                         content_hash: hash.value(i).to_string(),
                         size_bytes: sz.value(i),
+                        line_offsets: if offsets.is_null(i) {
+                            None
+                        } else {
+                            Some(offsets.value(i).to_string())
+                        },
                     });
                 }
             }
@@ -803,6 +815,17 @@ fn decode_gram_hex(value: &str) -> Option<[u8; 3]> {
         u8::from_str_radix(&value[2..4], 16).ok()?,
         u8::from_str_radix(&value[4..6], 16).ok()?,
     ])
+}
+
+fn line_offsets_json(path: &Path) -> Result<String> {
+    let content = std::fs::read(path)?;
+    let mut offsets = vec![0_u64];
+    for (idx, byte) in content.iter().enumerate() {
+        if *byte == b'\n' && idx + 1 < content.len() {
+            offsets.push((idx + 1) as u64);
+        }
+    }
+    Ok(serde_json::to_string(&offsets).unwrap_or_else(|_| "[0]".to_string()))
 }
 
 fn snapshots_schema() -> SchemaRef {
@@ -932,6 +955,7 @@ pub struct FileProofRow {
     pub content_hash: String,
     #[allow(dead_code)]
     pub size_bytes: u64,
+    pub line_offsets: Option<String>,
 }
 
 pub fn is_available(workspace_root: &Path) -> bool {
@@ -1030,6 +1054,32 @@ mod tests {
 
         assert_eq!(postings.get(b"nee").unwrap(), &vec![0usize]);
         assert_eq!(postings.get(b"eed").unwrap(), &vec![0usize, 1usize]);
+    }
+
+    #[test]
+    fn test_file_proofs_store_line_offsets() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("sample.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let store = LanceDbStore::open_or_create(root).unwrap();
+        store.ensure_tables().unwrap();
+        let records = vec![crate::workspace::FileRecord {
+            path: "sample.txt".to_string(),
+            language: "text".to_string(),
+            size: 14,
+            mtime_ms: 1,
+            mode: 0,
+            hash: "blake3:test".to_string(),
+        }];
+
+        store
+            .write_file_proofs("worktree:non-git", &records, Some(root))
+            .unwrap();
+
+        let proofs = store.read_file_proofs("worktree:non-git").unwrap();
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(proofs[0].line_offsets.as_deref(), Some("[0,4,8]"));
     }
 
     #[test]
