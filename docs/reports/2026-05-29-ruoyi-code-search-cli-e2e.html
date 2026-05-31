@@ -210,7 +210,7 @@
       <section class="panel">
         <h2>重点发现</h2>
         <ul>
-          <li><span class="tag warn">Warning</span> Java 当前不在 tree-sitter parser 支持列表内。对 <code>GenController.java</code> 执行 <code>defs GenController</code> 时返回空结果且无 warning 文案，行为稳定但可读性不够强。</li>
+          <li><span class="tag warn">Warning</span> Java 当时不在 tree-sitter parser 支持列表内。对 <code>GenController.java</code> 执行 <code>defs GenController</code> 时返回空结果且无 warning 文案，行为稳定但可读性不够强。<br /><span class="tag pass">2026-05-31 Resolved</span> 已接入 <code>tree-sitter-java</code>；Java class/method definitions 和 method invocation callers 已支持。</li>
           <li><span class="tag warn">Warning</span> <code>index build</code> 会在目标仓库创建未跟踪的 <code>.code-search/</code>；随后 <code>changed</code> 会把它报出来，影响“工作区是否有真实源码变更”的语义。</li>
           <li><span class="tag warn">Warning</span> <code>import-scip</code> 目前绑定到当前 snapshot key。若 <code>.code-search/</code> 让仓库从 <code>commit:*</code> 切到 <code>worktree:*</code>，precise 查询会错过刚导入的 SCIP 索引。本次用临时本地 ignore 验证了这是 snapshot 切换问题，而不是 SCIP 数据本身有误；验证后已撤销该本地 ignore。</li>
         </ul>
@@ -291,10 +291,10 @@
             <td><span class="tag pass">Pass</span></td>
           </tr>
           <tr>
-            <td>Java unsupported parser degradation</td>
+            <td>Java parser fallback support</td>
             <td><code>defs GenController</code> on <code>GenController.java</code></td>
-            <td>命令稳定返回空结果，reliability 仍为 <code>parser_fact</code>，但 warnings 为空。</td>
-            <td><span class="tag warn">Warning</span></td>
+            <td>历史结果：命令稳定返回空结果，reliability 仍为 <code>parser_fact</code>，但 warnings 为空。2026-05-31 已修复：Java parser fallback 现在能返回 class/method definitions，并识别 method invocation callers。</td>
+            <td><span class="tag warn">Historical</span> <span class="tag pass">Resolved</span></td>
           </tr>
           <tr>
             <td><code>index import-scip</code></td>

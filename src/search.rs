@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::{
     index,
-    workspace::{language_for_path, FileRecord, ScanOptions, Workspace},
+    workspace::{language_for_path, FileCatalogRecord, FileRecord, ScanOptions, Workspace},
 };
 
 pub struct QueryOutput {
@@ -28,7 +28,7 @@ pub fn files(
         None
     };
 
-    let source = candidate_files(workspace, opts)?;
+    let source = candidate_file_catalog(workspace, opts)?;
     for file in source.records {
         let matches = matcher
             .as_ref()
@@ -194,8 +194,7 @@ pub fn find(
 }
 
 pub fn changed(workspace: &Workspace) -> Result<Value> {
-    let changed = crate::workspace::git_status(&workspace.root).unwrap_or_default();
-    Ok(serde_json::to_value(changed)?)
+    Ok(serde_json::to_value(&workspace.changed)?)
 }
 
 pub fn status(workspace: &Workspace) -> Value {
@@ -288,18 +287,59 @@ struct CandidateFiles {
     index: Value,
 }
 
-fn candidate_files(workspace: &Workspace, opts: &ScanOptions) -> Result<CandidateFiles> {
+struct CandidateFileCatalog {
+    records: Vec<FileEntry>,
+    index: Value,
+}
+
+struct FileEntry {
+    path: String,
+    language: String,
+    size: u64,
+    hash: Option<String>,
+}
+
+impl From<FileRecord> for FileEntry {
+    fn from(record: FileRecord) -> Self {
+        Self {
+            path: record.path,
+            language: record.language,
+            size: record.size,
+            hash: Some(record.hash),
+        }
+    }
+}
+
+impl From<FileCatalogRecord> for FileEntry {
+    fn from(record: FileCatalogRecord) -> Self {
+        Self {
+            path: record.path,
+            language: record.language,
+            size: record.size,
+            hash: None,
+        }
+    }
+}
+
+fn candidate_file_catalog(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+) -> Result<CandidateFileCatalog> {
     if let Some((records, index)) = index::fresh_file_records(workspace, opts)? {
-        return Ok(CandidateFiles {
-            records: filter_records(records, opts),
+        return Ok(CandidateFileCatalog {
+            records: filter_file_entries(records.into_iter().map(FileEntry::from).collect(), opts),
             index,
         });
     }
 
     let mut scan_opts = opts.clone();
     scan_opts.limit = 0;
-    Ok(CandidateFiles {
-        records: workspace.scan_files(&scan_opts)?,
+    Ok(CandidateFileCatalog {
+        records: workspace
+            .scan_catalog(&scan_opts)?
+            .into_iter()
+            .map(FileEntry::from)
+            .collect(),
         index: index::live_scan_index_meta("index_missing_or_stale"),
     })
 }
@@ -326,6 +366,23 @@ fn candidate_text_files(
 }
 
 fn filter_records(records: Vec<FileRecord>, opts: &ScanOptions) -> Vec<FileRecord> {
+    records
+        .into_iter()
+        .filter(|record| {
+            !opts
+                .exclude
+                .iter()
+                .any(|pattern| record.path.contains(pattern))
+                && (opts.include.is_empty()
+                    || opts
+                        .include
+                        .iter()
+                        .any(|pattern| record.path.contains(pattern)))
+        })
+        .collect()
+}
+
+fn filter_file_entries(records: Vec<FileEntry>, opts: &ScanOptions) -> Vec<FileEntry> {
     records
         .into_iter()
         .filter(|record| {

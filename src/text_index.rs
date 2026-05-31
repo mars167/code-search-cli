@@ -29,6 +29,7 @@ pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
             language,
             size,
             mtime_ms,
+            mode: 0,
             hash,
         });
     }
@@ -36,19 +37,30 @@ pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
 }
 
 pub fn candidate_ids(path: &Path, pattern: &str, mode: &str) -> Result<Option<HashSet<usize>>> {
-    if mode != "literal" || pattern.as_bytes().len() < 3 {
+    let Some(query_grams) = query_grams(pattern, mode) else {
         return Ok(None);
-    }
-    let query_grams = grams_for_bytes(pattern.as_bytes());
-    if query_grams.is_empty() {
-        return Ok(None);
-    }
+    };
 
     let postings = read_selected_grams(path, &query_grams)?;
+    Ok(Some(intersect_postings(&query_grams, &postings)))
+}
+
+pub fn query_grams(pattern: &str, mode: &str) -> Option<HashSet<[u8; 3]>> {
+    if mode != "literal" || pattern.as_bytes().len() < 3 {
+        return None;
+    }
+    let query_grams = grams_for_bytes(pattern.as_bytes());
+    (!query_grams.is_empty()).then_some(query_grams)
+}
+
+pub fn intersect_postings(
+    query_grams: &HashSet<[u8; 3]>,
+    postings: &BTreeMap<[u8; 3], Vec<usize>>,
+) -> HashSet<usize> {
     let mut candidate: Option<HashSet<usize>> = None;
     for gram in query_grams {
-        let Some(ids) = postings.get(&gram) else {
-            return Ok(Some(HashSet::new()));
+        let Some(ids) = postings.get(gram) else {
+            return HashSet::new();
         };
         let current = ids.iter().copied().collect::<HashSet<_>>();
         candidate = Some(match candidate {
@@ -56,7 +68,7 @@ pub fn candidate_ids(path: &Path, pattern: &str, mode: &str) -> Result<Option<Ha
             None => current,
         });
     }
-    Ok(candidate)
+    candidate.unwrap_or_default()
 }
 
 fn read_selected_grams(

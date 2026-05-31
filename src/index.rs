@@ -68,7 +68,8 @@ pub fn build(
     } else {
         let mut scan_opts = opts.clone();
         scan_opts.limit = 0;
-        workspace.scan_files(&scan_opts)?
+        let catalog = workspace.scan_catalog(&scan_opts)?;
+        workspace.materialize_proofs(&catalog)?
     };
 
     let manifest = Manifest {
@@ -116,6 +117,33 @@ pub fn build(
             "storageBackend": "lancedb"
         }
     }))
+}
+
+pub fn update(workspace: &Workspace, opts: &ScanOptions) -> Result<Value> {
+    let status = status(workspace)?;
+    if status
+        .get("fresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(json!({
+            "updated": false,
+            "reason": "index_fresh",
+            "index": {
+                "used": true,
+                "fresh": true,
+                "source": "text_index",
+                "path": storage_root(workspace),
+                "storageBackend": "lancedb"
+            },
+            "status": status
+        }));
+    }
+
+    let mut value = build(workspace, opts, false, true, false)?;
+    value["updated"] = json!(true);
+    value["reason"] = json!("index_stale_or_missing");
+    Ok(value)
 }
 
 pub fn status(workspace: &Workspace) -> Result<Value> {
@@ -195,7 +223,8 @@ pub fn fresh_file_records(
     opts: &ScanOptions,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
     // Try local fresh snapshot first
-    let Some((manifest, records, text_path)) = fresh_text_snapshot(workspace, opts)? else {
+    let Some((manifest, records, text_path, _lancedb)) = fresh_text_snapshot(workspace, opts)?
+    else {
         // Fall back to remote snapshots
         return remote_fallback_text_records(workspace, None);
     };
@@ -213,13 +242,17 @@ pub fn fresh_text_records(
     mode: &str,
 ) -> Result<Option<(Vec<FileRecord>, Value)>> {
     // Try local fresh snapshot first
-    let Some((manifest, records, text_path)) = fresh_text_snapshot(workspace, opts)? else {
+    let Some((manifest, records, text_path, lancedb)) = fresh_text_snapshot(workspace, opts)?
+    else {
         // Fall back to remote snapshots with trigram prefilter
         return remote_fallback_text_records(workspace, Some((pattern, mode)));
     };
 
-    let candidate_ids =
-        text_index::candidate_ids(&text_path.join("grams.idx"), pattern, mode).unwrap_or(None);
+    let candidate_ids = if lancedb {
+        lancedb_candidate_ids(workspace, &manifest.snapshot_id, pattern, mode).unwrap_or(None)
+    } else {
+        text_index::candidate_ids(&text_path.join("grams.idx"), pattern, mode).unwrap_or(None)
+    };
     let filtered = match &candidate_ids {
         Some(ids) => records
             .into_iter()
@@ -288,6 +321,23 @@ fn remote_fallback_text_records(
     }
 
     Ok(None)
+}
+
+fn lancedb_candidate_ids(
+    workspace: &Workspace,
+    snapshot_id: &str,
+    pattern: &str,
+    mode: &str,
+) -> Result<Option<std::collections::HashSet<usize>>> {
+    let Some(query_grams) = text_index::query_grams(pattern, mode) else {
+        return Ok(None);
+    };
+    let store = lancedb_store::LanceDbStore::open_or_create(&workspace.root)?;
+    let postings = store.read_gram_postings(snapshot_id, &query_grams)?;
+    Ok(Some(text_index::intersect_postings(
+        &query_grams,
+        &postings,
+    )))
 }
 
 impl From<&ScanOptions> for IndexScanOptions {
@@ -516,7 +566,7 @@ pub(crate) fn snapshot_key(snapshot_id: &str) -> String {
 fn fresh_text_snapshot(
     workspace: &Workspace,
     opts: &ScanOptions,
-) -> Result<Option<(Manifest, Vec<FileRecord>, PathBuf)>> {
+) -> Result<Option<(Manifest, Vec<FileRecord>, PathBuf, bool)>> {
     if lancedb_store::is_available(&workspace.root) {
         if let Ok(store) = lancedb_store::LanceDbStore::open_or_create(&workspace.root) {
             if let Ok(Some(snapshot)) = store.read_snapshot(&workspace.snapshot_id) {
@@ -540,7 +590,7 @@ fn fresh_text_snapshot(
                                 if fresh {
                                     let manifest = snapshot_row_to_manifest(&snapshot);
                                     let text_path = text_dir(workspace, &snapshot.snapshot_key);
-                                    return Ok(Some((manifest, records, text_path)));
+                                    return Ok(Some((manifest, records, text_path, true)));
                                 }
                             }
                         }
@@ -568,7 +618,7 @@ fn fresh_text_snapshot(
         return Ok(None);
     }
 
-    Ok(Some((manifest, records, text_path)))
+    Ok(Some((manifest, records, text_path, false)))
 }
 
 fn text_index_meta(
@@ -617,6 +667,7 @@ fn staged_records(workspace: &Workspace, blobs_dir: Option<&Path>) -> Result<Vec
             language: crate::workspace::language_for_path(Path::new(&path)).to_string(),
             size: content.len() as u64,
             mtime_ms: 0,
+            mode: 0,
             hash,
             path,
         });
@@ -641,12 +692,14 @@ fn freshness(workspace: &Workspace, records: &[FileRecord]) -> Value {
             missingFiles.push(json!({ "path": record.path, "reason": "missing" }));
             continue;
         }
-        // metadata fast path: if mtime and size match, skip hash
+        // metadata fast path: if size, mtime, and mode match, skip hash
         match fs::metadata(&path) {
             Ok(meta) => {
                 let current_mtime = crate::workspace::mtime_ms(&meta);
                 let current_size = meta.len();
-                if current_mtime == record.mtime_ms && current_size == record.size {
+                let current_mode = crate::workspace::file_mode(&meta);
+                let mode_matches = record.mode == 0 || current_mode == record.mode;
+                if current_mtime == record.mtime_ms && current_size == record.size && mode_matches {
                     fresh.push(record.path.clone());
                     continue;
                 }
@@ -1131,6 +1184,10 @@ fn write_to_lancedb(
     let scan_options_json = serde_json::to_string(&manifest.scan_options).unwrap_or_default();
 
     lancedb
+        .delete_snapshot_rows(&manifest.snapshot_id)
+        .with_context(|| "failed to replace old LanceDB snapshot rows")?;
+
+    lancedb
         .write_snapshot(
             &manifest.snapshot_id,
             &manifest.snapshot_key,
@@ -1165,6 +1222,10 @@ fn write_to_lancedb(
                 let gram = [window[0], window[1], window[2]];
                 gram_index.entry(gram).or_default().push(doc_id as u32);
             }
+        }
+        for ids in gram_index.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
         }
         if !gram_index.is_empty() {
             lancedb

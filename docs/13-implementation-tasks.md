@@ -18,7 +18,7 @@
 | T1 CLI command surface | Done | `find`, `grep`, `files`, `find-path`, `glob`, `list`, `tree`, `read`, `refs`, `symbols`, `defs`, `calls`, `callers`, `changed`, `status`, `watch`, `serve`, `index`, and `hooks` are wired. |
 | T2 Unified JSON reliability contract | Done | Responses include `snapshot_id`, `reliability`, `producer`, `exact`, warnings, and fallback metadata. |
 | T3 L0 source fact commands | Done | Search, path, read, git status, and changed-file commands work without requiring a prebuilt index. |
-| T4 Parser facts | Done | `symbols` and `defs` use tree-sitter fallback for Rust, Python, TypeScript, and JavaScript. |
+| T4 Parser facts | Done | `symbols` and `defs` use tree-sitter fallback for Rust, Python, Java, TypeScript, and JavaScript. |
 | T5 Relation candidates | Done | `calls` and `callers` expose tree-sitter call heuristics as `inferred_candidate`, never `exact`. |
 | T6 Index lifecycle | In progress | `index build/status/verify/clean` now writes `.code-search/snapshots/`, `.code-search/text/`, `.code-search/working/`, and `.code-search/staged/` with native text `.idx` segments. `cargo test` and manual CLI checks on 2026-05-29 confirmed build output layout plus stale-file `index verify -> exit 6`. Source snapshot `files.parquet`/`blobs/`, SCIP occurrence DB, and graph backend remain required. |
 | T7 Git hook lifecycle | Done | Hook install/status/uninstall support staged and commit update entrypoints without making hooks authoritative. |

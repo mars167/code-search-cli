@@ -13,16 +13,20 @@ SUMMARY_PRINTED=0
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/quality-gate.sh {quick|cli|bench|full}
+Usage: scripts/quality-gate.sh {pr|main|bench|quick|cli|full}
 
 Commands:
-  quick  Run fast local quality gates: fmt, check, tests, diff whitespace.
-  cli    Run CLI contract tests and a RuoYi smoke test when TEST_REPO exists.
+  pr     Run required PR gates: fmt, diff whitespace, all target tests.
+  main   Run PR gates plus release build and required RuoYi smoke.
   bench  Run performance regression checks via scripts/bench.sh compare.
-  full   Run quick, cli, and bench in sequence.
+  quick  Compatibility alias for pr.
+  cli    Compatibility alias for main.
+  full   Run main and bench in sequence.
 
 Environment:
   TEST_REPO  Fixture repository path for CLI smoke and benchmarks.
+  REQUIRE_TEST_REPO
+             When set to 1, missing TEST_REPO fails smoke/bench gates.
   CS_BIN     code-search binary path. Defaults to target/release/code-search.
 USAGE
 }
@@ -89,19 +93,22 @@ assert_code_search() {
   fi
 }
 
-run_quick() {
-  note "quick quality gate"
+run_pr() {
+  note "PR quality gate"
   cd "$ROOT"
   run_step "cargo fmt --check" cargo fmt --check
-  run_step "cargo check" cargo check
-  run_step "cargo test --lib" cargo test --lib
   run_step "git diff --check" git diff --check
+  run_step "cargo test --all-targets --locked --no-fail-fast" cargo test --all-targets --locked --no-fail-fast
 }
 
 run_ruoyi_smoke() {
   note "RuoYi L0 smoke"
   if [[ ! -d "$TEST_REPO" ]]; then
-    skip "fixture repo not found: $TEST_REPO"
+    if [[ "${REQUIRE_TEST_REPO:-0}" == "1" ]]; then
+      fail "required fixture repo not found: $TEST_REPO"
+      return 1
+    fi
+    skip "non-blocking smoke skipped; fixture repo not found: $TEST_REPO"
     return 0
   fi
 
@@ -138,11 +145,11 @@ run_ruoyi_smoke() {
     status
 }
 
-run_cli() {
-  note "cli quality gate"
+run_main() {
+  note "main quality gate"
   cd "$ROOT"
-  run_step "cargo build --release" cargo build --release --bin code-search
-  run_step "cargo test --test cli" cargo test --test cli
+  run_pr
+  run_step "cargo build --release --locked" cargo build --release --locked --bin code-search
   run_ruoyi_smoke
 }
 
@@ -154,9 +161,13 @@ run_bench() {
   require_tool bc
   # Reuse release binary if already built (e.g. from 'full' gate)
   if [[ ! -x "$CS_BIN" ]]; then
-    run_step "cargo build --release" cargo build --release --bin code-search
+    run_step "cargo build --release --locked" cargo build --release --locked --bin code-search
   fi
   if [[ ! -d "$TEST_REPO" ]]; then
+    if [[ "${REQUIRE_TEST_REPO:-0}" == "1" ]]; then
+      fail "required benchmark fixture repo not found: $TEST_REPO"
+      return 1
+    fi
     skip "benchmark fixture repo not found: $TEST_REPO"
     return 0
   fi
@@ -187,18 +198,23 @@ trap finish EXIT
 main() {
   local command="${1:-}"
   case "$command" in
+    pr)
+      run_pr
+      ;;
+    main)
+      run_main
+      ;;
     quick)
-      run_quick
+      run_pr
       ;;
     cli)
-      run_cli
+      run_main
       ;;
     bench)
       run_bench
       ;;
     full)
-      run_quick
-      run_cli
+      run_main
       run_bench
       ;;
     -h|--help|help)

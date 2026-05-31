@@ -190,6 +190,133 @@ fn find_uses_fresh_text_index_for_candidates() {
 }
 
 #[test]
+fn find_uses_lancedb_gram_prefilter_for_candidates() {
+    let dir = tempdir().unwrap();
+    fs::write(
+        dir.path().join("hit.txt"),
+        "this file contains needle_rare_literal\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("miss.txt"),
+        "this file contains many words but not the target\n",
+    )
+    .unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle_rare_literal"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["fresh"], true);
+    assert_eq!(json["index"]["prefilter"], "trigram");
+    assert_eq!(json["index"]["candidateCount"], 1);
+    assert_eq!(json["results"][0]["path"], "hit.txt");
+}
+
+#[test]
+fn index_update_noops_when_index_is_fresh() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "update"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let result = &json["results"][0];
+
+    assert_eq!(result["updated"], false);
+    assert_eq!(result["reason"], "index_fresh");
+    assert_eq!(result["index"]["fresh"], true);
+}
+
+#[test]
+fn index_update_replaces_stale_gram_postings() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "alpha oldtoken\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("sample.txt"), "alpha newtoken\n").unwrap();
+
+    code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "update"])
+        .assert()
+        .success();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "oldtoken"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], true);
+    assert_eq!(json["index"]["fresh"], true);
+    assert_eq!(json["index"]["candidateCount"], 0);
+    assert_eq!(json["results"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn files_live_scan_uses_catalog_without_content_hash() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["files", "sample"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["index"]["used"], false);
+    assert_eq!(json["results"][0]["producer"], "live_file_catalog");
+    assert!(json["results"][0]["hash"].is_null());
+}
+
+#[test]
 fn query_falls_back_when_scan_options_do_not_match_index() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join(".hidden.txt"), "needle\n").unwrap();
@@ -332,6 +459,76 @@ fn defs_falls_back_to_parser_after_plain_index_build_without_scip() {
 
     assert_eq!(defs_json["reliability"]["level"], "parser_fact");
     assert_eq!(defs_json["results"][0]["producer"], "tree_sitter_parser");
+}
+
+#[test]
+fn defs_falls_back_to_parser_for_java_classes() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/main/java/example")).unwrap();
+    fs::write(
+        dir.path().join("src/main/java/example/SampleService.java"),
+        "package example;\n\npublic class SampleService {\n    public void run() {}\n}\n",
+    )
+    .unwrap();
+
+    let defs = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["defs", "SampleService"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let defs_json: Value = serde_json::from_slice(&defs).unwrap();
+
+    assert_eq!(defs_json["reliability"]["level"], "parser_fact");
+    assert_eq!(defs_json["results"][0]["name"], "SampleService");
+    assert_eq!(defs_json["results"][0]["kind"], "class");
+    assert_eq!(defs_json["results"][0]["language"], "java");
+    assert_eq!(
+        defs_json["results"][0]["path"],
+        "src/main/java/example/SampleService.java"
+    );
+}
+
+#[test]
+fn parser_fallback_supports_java_methods_and_callers() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/main/java/example")).unwrap();
+    fs::write(
+        dir.path().join("src/main/java/example/SampleService.java"),
+        "package example;\n\npublic class SampleService {\n    public void run() {}\n\n    public void start() {\n        run();\n    }\n}\n",
+    )
+    .unwrap();
+
+    let defs = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["defs", "run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let defs_json: Value = serde_json::from_slice(&defs).unwrap();
+    assert_eq!(defs_json["results"][0]["name"], "run");
+    assert_eq!(defs_json["results"][0]["kind"], "function");
+    assert_eq!(defs_json["results"][0]["language"], "java");
+
+    let callers = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["callers", "run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let callers_json: Value = serde_json::from_slice(&callers).unwrap();
+    assert_eq!(callers_json["results"][0]["target"], "run");
+    assert_eq!(callers_json["results"][0]["enclosingSymbol"], "start");
+    assert_eq!(callers_json["results"][0]["language"], "java");
 }
 
 #[test]

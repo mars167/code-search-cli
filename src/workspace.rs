@@ -1,11 +1,13 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{anyhow, Context, Result};
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -24,7 +26,19 @@ pub struct FileRecord {
     pub language: String,
     pub size: u64,
     pub mtime_ms: u128,
+    #[serde(default)]
+    pub mode: u32,
     pub hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileCatalogRecord {
+    pub path: String,
+    pub language: String,
+    pub size: u64,
+    pub mtime_ms: u128,
+    pub mode: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -43,6 +57,7 @@ pub struct Workspace {
     pub dirty: bool,
     pub staged_count: usize,
     pub worktree_count: usize,
+    pub changed: Vec<ChangedFile>,
     pub snapshot_id: String,
 }
 
@@ -83,6 +98,7 @@ impl Workspace {
             dirty,
             staged_count,
             worktree_count,
+            changed,
             snapshot_id,
         })
     }
@@ -98,7 +114,7 @@ impl Workspace {
         self.root.join(rel)
     }
 
-    pub fn scan_files(&self, opts: &ScanOptions) -> Result<Vec<FileRecord>> {
+    pub fn scan_catalog(&self, opts: &ScanOptions) -> Result<Vec<FileCatalogRecord>> {
         let mut builder = WalkBuilder::new(&self.root);
         builder
             .hidden(!opts.hidden)
@@ -130,13 +146,12 @@ impl Workspace {
                 continue;
             }
             let metadata = fs::metadata(path)?;
-            let content = fs::read(path)?;
-            files.push(FileRecord {
+            files.push(FileCatalogRecord {
                 path: rel,
                 language: language_for_path(path).to_string(),
                 size: metadata.len(),
                 mtime_ms: mtime_ms(&metadata),
-                hash: format!("blake3:{}", blake3::hash(&content).to_hex()),
+                mode: file_mode(&metadata),
             });
             if opts.limit > 0 && files.len() >= opts.limit {
                 break;
@@ -145,6 +160,32 @@ impl Workspace {
 
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(files)
+    }
+
+    pub fn materialize_proofs(&self, catalog: &[FileCatalogRecord]) -> Result<Vec<FileRecord>> {
+        let mut records = catalog
+            .par_iter()
+            .map(|file| -> Result<FileRecord> {
+                let path = self.abs_path(&file.path);
+                let content =
+                    fs::read(&path).with_context(|| format!("failed to read {}", file.path))?;
+                Ok(FileRecord {
+                    path: file.path.clone(),
+                    language: file.language.clone(),
+                    size: file.size,
+                    mtime_ms: file.mtime_ms,
+                    mode: file.mode,
+                    hash: format!("blake3:{}", blake3::hash(&content).to_hex()),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        records.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(records)
+    }
+
+    pub fn scan_files(&self, opts: &ScanOptions) -> Result<Vec<FileRecord>> {
+        let catalog = self.scan_catalog(opts)?;
+        self.materialize_proofs(&catalog)
     }
 }
 
@@ -232,6 +273,7 @@ pub fn language_for_path(path: &Path) -> &'static str {
     match path.extension().and_then(|ext| ext.to_str()).unwrap_or("") {
         "rs" => "rust",
         "py" => "python",
+        "java" => "java",
         "ts" | "tsx" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "md" | "markdown" => "markdown",
@@ -266,8 +308,13 @@ pub fn matches_filters(path: &str, include: &[String], exclude: &[String]) -> bo
 }
 
 fn is_probably_binary(path: &Path) -> bool {
-    match fs::read(path) {
-        Ok(bytes) => bytes.iter().take(8192).any(|byte| *byte == 0),
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return true,
+    };
+    let mut bytes = Vec::with_capacity(8192);
+    match file.by_ref().take(8192).read_to_end(&mut bytes) {
+        Ok(_) => bytes.iter().any(|byte| *byte == 0),
         Err(_) => true,
     }
 }
@@ -279,6 +326,17 @@ pub(crate) fn mtime_ms(metadata: &fs::Metadata) -> u128 {
         .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+#[cfg(unix)]
+pub(crate) fn file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn file_mode(_metadata: &fs::Metadata) -> u32 {
+    0
 }
 
 fn short_hash(value: &str) -> String {

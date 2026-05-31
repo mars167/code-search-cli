@@ -105,6 +105,7 @@ pub fn read_files_parquet(path: &Path) -> Result<Vec<FileRecord>> {
                 language: language_col.value(i).to_string(),
                 size: size_col.value(i),
                 mtime_ms: mtime_col.value(i) as u128,
+                mode: 0,
                 hash: hash_col.value(i).to_string(),
             });
         }

@@ -158,6 +158,7 @@ pub struct PetgraphBackend {
     /// Cache: node-index lookup by scoped identifier.
     pub(crate) node_by_id: std::collections::HashMap<String, petgraph::graph::NodeIndex>,
     pub(crate) snapshot_id: String,
+    pub(crate) schema_version: u32,
 }
 
 impl PetgraphBackend {
@@ -167,6 +168,7 @@ impl PetgraphBackend {
             graph: DiGraph::new(),
             node_by_id: std::collections::HashMap::new(),
             snapshot_id: String::new(),
+            schema_version: SerialisedGraph::CURRENT_SCHEMA_VERSION,
         }
     }
 
@@ -234,6 +236,7 @@ impl PetgraphBackend {
             graph,
             node_by_id,
             snapshot_id: serialised.snapshot_id,
+            schema_version: serialised.schema_version,
         })
     }
 
@@ -249,6 +252,7 @@ impl PetgraphBackend {
 impl GraphBackend for PetgraphBackend {
     fn build(&mut self, workspace: &Workspace, graph_dir: &Path) -> Result<()> {
         self.snapshot_id = workspace.snapshot_id.clone();
+        self.schema_version = SerialisedGraph::CURRENT_SCHEMA_VERSION;
         builder::build_petgraph_backend(self, workspace)?;
         self.save_to_disk(graph_dir)?;
         Ok(())
@@ -307,7 +311,9 @@ impl GraphBackend for PetgraphBackend {
     }
 
     fn freshness_check(&self, snapshot_id: &str) -> Result<bool> {
-        Ok(self.snapshot_id == snapshot_id && !self.snapshot_id.is_empty())
+        Ok(self.snapshot_id == snapshot_id
+            && !self.snapshot_id.is_empty()
+            && self.schema_version == SerialisedGraph::CURRENT_SCHEMA_VERSION)
     }
 }
 
@@ -438,6 +444,23 @@ mod tests {
         backend.snapshot_id = "commit:abc123".to_string();
         assert!(backend.freshness_check("commit:abc123").unwrap());
         assert!(!backend.freshness_check("commit:def456").unwrap());
+    }
+
+    #[test]
+    fn freshness_rejects_stored_graph_with_old_schema_version() {
+        let dir = tempdir().unwrap();
+        let graph = SerialisedGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            snapshot_id: "commit:abc123".to_string(),
+            schema_version: SerialisedGraph::CURRENT_SCHEMA_VERSION.saturating_sub(1),
+        };
+        let bin_path = dir.path().join("petgraph.bin");
+        std::fs::write(&bin_path, bincode::serialize(&graph).unwrap()).unwrap();
+
+        let backend = PetgraphBackend::load_from_disk(&bin_path).unwrap();
+
+        assert!(!backend.freshness_check("commit:abc123").unwrap());
     }
 
     #[test]

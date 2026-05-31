@@ -389,7 +389,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 json!({}),
                 &workspace.snapshot_id,
                 output::freshness(),
-                json!([index::build(&workspace, &scan_opts, false, true, false)?]),
+                json!([index::update(&workspace, &scan_opts)?]),
                 Vec::new(),
             ),
             IndexCommand::Status => output::response(

@@ -352,7 +352,7 @@ language + parser_version + file_hash
 - 对同一 language 的文件复用 Parser 实例，仅调用 `parse()` 方法
 - 预期减少 ~10% parser 初始化开销（在缓存命中前仍有收益）
 
-> **Java parser 是独立 feature**，不在本性能优化方案中。当前 `Cargo.toml` 无 `tree-sitter-java` 依赖，`parser_language` 不支持 Java。Java 支持需独立 MR：添加 `tree-sitter-java` 依赖并扩展 `parser_language` 函数，在 parser facts cache 落地后进行。
+> Java parser 已接入 `tree-sitter-java`，`parser_language` 支持 Java。后续 parser facts cache 落地时，需要把 Java 与现有 Rust/Python/TypeScript/JavaScript 一起纳入缓存键、parser 复用池和回归基准。
 
 ### 验收指标
 

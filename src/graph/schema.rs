@@ -171,5 +171,5 @@ pub struct SerialisedGraph {
 }
 
 impl SerialisedGraph {
-    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 }
