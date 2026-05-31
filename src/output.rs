@@ -305,16 +305,19 @@ fn render_jsonl(value: &Value, out: &mut dyn Write) -> io::Result<()> {
 
 fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
         writeln!(
             out,
             "error: {}",
-            value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
+            message.lines().next().unwrap_or("unknown error").trim()
         )?;
         return Ok(());
     }
+
+    render_text_warnings(value, out)?;
 
     if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
         let reason = value
@@ -329,8 +332,42 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
             out,
             "warning: broad query guard triggered ({reason}); suppressed {suppressed} results"
         )?;
+        render_text_summary(value, out)?;
+        render_text_next_action(value, out, "allow_broad")?;
+        render_text_results(value, out)?;
+        return Ok(());
     }
 
+    if value.get("noMatch").is_some() {
+        let command = value
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("query");
+        writeln!(out, "no matches for {command}")?;
+        render_text_next_action(value, out, "")?;
+        return Ok(());
+    }
+
+    if value
+        .pointer("/ambiguity/triggered")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        let count = value
+            .pointer("/ambiguity/candidateCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        writeln!(out, "ambiguous results: {count} candidates")?;
+        render_text_facets(value.pointer("/ambiguity/groups/kind"), out, "kinds")?;
+        render_text_facets(value.pointer("/ambiguity/groups/topDir"), out, "top dirs")?;
+        render_text_next_action(value, out, "narrow_scope")?;
+    }
+
+    render_text_results(value, out)?;
+    Ok(())
+}
+
+fn render_text_results(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     if let Some(results) = value.get("results").and_then(Value::as_array) {
         for result in results {
             if let Some(path) = result.get("path").and_then(Value::as_str) {
@@ -351,6 +388,116 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     }
 
     writeln!(out, "{value}")?;
+    Ok(())
+}
+
+fn render_text_warnings(value: &Value, out: &mut dyn Write) -> io::Result<()> {
+    for warning in value
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let code = warning
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("warning");
+        if matches!(
+            code,
+            "no_match" | "broad_query_guard_triggered" | "ambiguous_results"
+        ) {
+            continue;
+        }
+        let message = warning
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or(code);
+        writeln!(out, "warning: {code}: {message}")?;
+    }
+    Ok(())
+}
+
+fn render_text_summary(value: &Value, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out, "summary:")?;
+    if let Some(matches) = value
+        .pointer("/guard/estimatedMatches")
+        .and_then(Value::as_u64)
+    {
+        writeln!(out, "  estimated matches: {matches}")?;
+    }
+    if let Some(files) = value.pointer("/guard/matchedFiles").and_then(Value::as_u64) {
+        writeln!(out, "  matched files: {files}")?;
+    }
+    render_text_facets(
+        value.pointer("/summary/facets/language"),
+        out,
+        "top languages",
+    )?;
+    render_text_facets(value.pointer("/summary/facets/topDir"), out, "top dirs")?;
+    Ok(())
+}
+
+fn render_text_facets(facets: Option<&Value>, out: &mut dyn Write, label: &str) -> io::Result<()> {
+    let Some(values) = facets.and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if values.is_empty() {
+        return Ok(());
+    }
+    let rendered = values
+        .iter()
+        .take(5)
+        .filter_map(|facet| {
+            let value = facet.get("value").and_then(Value::as_str)?;
+            let count = facet.get("count").and_then(Value::as_u64)?;
+            Some(format!("{value}={count}"))
+        })
+        .collect::<Vec<_>>();
+    if !rendered.is_empty() {
+        writeln!(out, "  {label}: {}", rendered.join(", "))?;
+    }
+    Ok(())
+}
+
+fn render_text_next_action(
+    value: &Value,
+    out: &mut dyn Write,
+    preferred_kind: &str,
+) -> io::Result<()> {
+    let mut actions = Vec::new();
+    actions.extend(
+        value
+            .get("nextActions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    actions.extend(
+        value
+            .pointer("/guard/nextActions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten(),
+    );
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let action = actions
+        .iter()
+        .copied()
+        .find(|action| {
+            !preferred_kind.is_empty()
+                && action.get("kind").and_then(Value::as_str) == Some(preferred_kind)
+        })
+        .or_else(|| actions.first().copied());
+    let Some(action) = action else {
+        return Ok(());
+    };
+    if let Some(command) = action.get("command").and_then(Value::as_str) {
+        writeln!(out, "try: {command}")?;
+    } else if let Some(reason) = action.get("reason").and_then(Value::as_str) {
+        writeln!(out, "next: {reason}")?;
+    }
     Ok(())
 }
 
