@@ -1227,6 +1227,147 @@ fn text_output_reports_broad_guard_warning() {
 }
 
 #[test]
+fn text_output_regular_search_stays_path_line_focused() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n let needle = 1;\n}\n",
+    )
+    .unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert_eq!(text.trim(), "src/main.rs:2");
+}
+
+#[test]
+fn text_output_no_match_shows_hint_and_exit_code_two() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["find", "MissingThing"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("no matches for find"));
+    assert!(text.contains("try: code-search --path"));
+    assert!(text.contains("grep MissingThing"));
+}
+
+#[test]
+fn text_output_broad_query_shows_summary_facets_and_next_action() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/java")).unwrap();
+    for idx in 0..8 {
+        fs::write(
+            dir.path().join(format!("src/java/Public{idx}.java")),
+            "public class Sample {}\n",
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["find", "public"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("summary:"));
+    assert!(text.contains("estimated matches: 8"));
+    assert!(text.contains("top languages: java=8"));
+    assert!(text.contains("next: rerun with --allow-broad"));
+}
+
+#[test]
+fn text_output_fallback_warning_is_visible() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn helper() {}\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["defs", "helper"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("warning: precise_scip_index_unavailable"));
+    assert!(text.contains("src/lib.rs:1"));
+}
+
+#[test]
+fn text_output_error_is_single_readable_line() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["grep", "["])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.starts_with("error:"));
+    assert!(!text.contains("\"schemaVersion\""));
+}
+
+#[test]
+fn text_output_parse_error_is_single_readable_line() {
+    let output = code_search()
+        .args(["--output", "text", "--definitely-not-an-option"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.starts_with("error:"));
+    assert!(!text.contains("Usage:"));
+}
+
+#[test]
 fn json_output_includes_read_suggestions_and_next_actions() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
