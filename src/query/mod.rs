@@ -488,9 +488,12 @@ fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {
 }
 
 fn page_response(value: Value, page: search::QueryOutput) -> Value {
-    output::with_guard(
-        output::with_page_meta(value, page.truncated, page.next_cursor, page.facets),
-        page.guard,
+    output::with_budget(
+        output::with_guard(
+            output::with_page_meta(value, page.truncated, page.next_cursor, page.facets),
+            page.guard,
+        ),
+        page.budget,
     )
 }
 

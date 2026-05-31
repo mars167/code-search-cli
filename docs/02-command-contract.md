@@ -56,6 +56,13 @@ flowchart TB
     "fresh": true,
     "fallback": false
   },
+  "budget": {
+    "tier": "small",
+    "maxResults": 100,
+    "maxPreviewChars": 240,
+    "maxContextLines": 0,
+    "reason": "small_workspace_low_hits"
+  },
   "results": [],
   "warnings": []
 }
@@ -70,6 +77,7 @@ flowchart TB
 - `snapshot_id` 表示结果绑定的 Git/worktree 视角。
 - `reliability` 告诉 Agent 是否能把结果当作事实。
 - `index` 只描述缓存是否参与和是否新鲜。
+- `budget` 描述本次输出预算：`tier` 按仓库规模/命中量分为 `small`、`medium`、`large`，并暴露 `maxResults`、`maxPreviewChars`、`maxContextLines` 和 `reason`。宽查询 guard 仍是硬保护；budget 是常规输出压缩策略。
 - `warnings` 必须暴露 fallback、stale、remote mismatch 或 heuristic 边界；每条 warning 使用 `{code,message}` 结构，`code` 稳定、可匹配。
 
 ## 可靠性流转

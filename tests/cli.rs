@@ -842,6 +842,122 @@ fn jsonl_summary_includes_cursor_and_facets() {
 }
 
 #[test]
+fn small_workspace_uses_generous_output_budget() {
+    let dir = tempdir().unwrap();
+    let preview = format!("needle {}\n", "a".repeat(180));
+    fs::write(dir.path().join("small.rs"), preview).unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["budget"]["tier"], "small");
+    assert_eq!(json["budget"]["maxResults"], 100);
+    assert_eq!(json["budget"]["maxPreviewChars"], 240);
+    assert_eq!(json["budget"]["maxContextLines"], 0);
+    assert_eq!(json["results"][0]["previewTruncated"], false);
+    assert_eq!(json["summary"]["truncatedCount"], 0);
+}
+
+#[test]
+fn medium_workspace_truncates_preview_with_reason() {
+    let dir = tempdir().unwrap();
+    for idx in 0..35 {
+        fs::write(
+            dir.path().join(format!("file{idx}.rs")),
+            format!("needle {}\n", "m".repeat(220)),
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["budget"]["tier"], "medium");
+    assert_eq!(json["budget"]["maxPreviewChars"], 160);
+    assert_eq!(json["results"][0]["truncated"], true);
+    assert_eq!(
+        json["results"][0]["truncatedReason"],
+        "output_budget_preview"
+    );
+    assert_eq!(json["results"][0]["previewTruncated"], true);
+    assert_eq!(
+        json["results"][0]["previewTruncatedReason"],
+        "output_budget_preview"
+    );
+    assert!(!json["suggestedReads"].as_array().unwrap().is_empty());
+    assert_eq!(json["summary"]["truncatedCount"], 35);
+}
+
+#[test]
+fn large_high_hit_workspace_reduces_preview_and_context_budget() {
+    let dir = tempdir().unwrap();
+    for idx in 0..220 {
+        fs::write(
+            dir.path().join(format!("file{idx}.rs")),
+            format!(
+                "alpha {idx}\nbeta {idx}\ngamma {idx}\nneedle {}\ndelta {idx}\nepsilon {idx}\nzeta {idx}\n",
+                "l".repeat(260)
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--context")
+        .arg("3")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let first_context = json["results"][0]["context"].as_array().unwrap();
+
+    assert_eq!(json["budget"]["tier"], "large");
+    assert_eq!(json["budget"]["maxPreviewChars"], 96);
+    assert_eq!(json["budget"]["maxContextLines"], 3);
+    assert!(
+        json["results"][0]["preview"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 99
+    );
+    assert_eq!(
+        json["results"][0]["previewTruncatedReason"],
+        "output_budget_preview"
+    );
+    assert_eq!(first_context.len(), 7);
+    assert_eq!(
+        json["results"][0]["contextTruncatedReason"],
+        "output_budget_context"
+    );
+    assert_eq!(json["results"][0]["truncated"], true);
+    assert!(!json["suggestedReads"].as_array().unwrap().is_empty());
+    assert_eq!(json["truncated"], true);
+}
+
+#[test]
 fn broad_find_returns_guarded_summary_samples() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src/main/java/example")).unwrap();
@@ -970,6 +1086,36 @@ fn allow_broad_expands_with_limit_and_cursor() {
     assert_eq!(json["results"].as_array().unwrap().len(), 2);
     assert_eq!(json["truncated"], true);
     assert!(json["nextCursor"].as_str().is_some());
+}
+
+#[test]
+fn limit_does_not_bypass_broad_query_guard() {
+    let dir = tempdir().unwrap();
+    for idx in 0..8 {
+        fs::write(
+            dir.path().join(format!("file{idx}.java")),
+            "public class Sample {}\n",
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("20")
+        .args(["find", "public"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["budget"]["maxResults"], 20);
+    assert_eq!(json["guard"]["triggered"], true);
+    assert_eq!(json["results"].as_array().unwrap().len(), 5);
+    assert_eq!(json["nextCursor"], Value::Null);
 }
 
 #[test]
