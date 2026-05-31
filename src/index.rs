@@ -44,6 +44,10 @@ struct IndexScanOptions {
     exclude: Vec<String>,
     hidden: bool,
     no_ignore: bool,
+    #[serde(default)]
+    lang: Vec<String>,
+    #[serde(default)]
+    changed: bool,
 }
 
 pub fn build(
@@ -359,6 +363,8 @@ impl From<&ScanOptions> for IndexScanOptions {
             exclude: opts.exclude.clone(),
             hidden: opts.hidden,
             no_ignore: opts.no_ignore,
+            lang: opts.lang.clone(),
+            changed: opts.changed,
         }
     }
 }
@@ -762,6 +768,8 @@ fn snapshot_row_to_manifest(s: &lancedb_store::SnapShotRow) -> Manifest {
             exclude: Vec::new(),
             hidden: false,
             no_ignore: false,
+            lang: Vec::new(),
+            changed: false,
         });
     Manifest {
         schema_version: s.schema_version,
@@ -1031,6 +1039,8 @@ pub fn unpack(workspace: &Workspace, archive_path: &str) -> Result<Value> {
                 exclude: Vec::new(),
                 hidden: false,
                 no_ignore: false,
+                lang: Vec::new(),
+                changed: false,
             },
             created_at_epoch_ms: now_ms(),
         },

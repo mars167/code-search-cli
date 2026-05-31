@@ -61,6 +61,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "text": { "type": "string", "description": "Literal text to search for" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include (AND filter)" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" },
                     "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
                 },
@@ -77,6 +80,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "pattern": { "type": "string", "description": "Regular expression pattern" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" },
                     "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
                 },
@@ -94,6 +100,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "pattern": { "type": "string", "description": "Substring to match in file paths" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
@@ -109,6 +118,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs)" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
@@ -138,6 +150,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "identifier": { "type": "string", "description": "Identifier to find definitions for" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
@@ -154,6 +169,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "identifier": { "type": "string", "description": "Identifier to find references for" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
@@ -170,6 +188,9 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "query": { "type": "string", "description": "Symbol name query (substring match)" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
+                    "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
+                    "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["query"]
@@ -477,6 +498,15 @@ fn parse_query_options(args: Option<&Value>) -> QueryOptions {
     QueryOptions {
         include: extract_string_array(obj, "include"),
         exclude: extract_string_array(obj, "exclude"),
+        lang: extract_string_array(obj, "lang"),
+        changed: obj
+            .get("changed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        cursor: obj
+            .get("cursor")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
         limit: obj
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -774,12 +804,18 @@ mod tests {
         let args = json!({
             "include": ["src", "lib"],
             "exclude": ["test"],
+            "lang": ["rust"],
+            "changed": true,
+            "cursor": "v1:abc:10",
             "limit": 50,
             "context": 3
         });
         let opts = parse_query_options(Some(&args));
         assert_eq!(opts.include, vec!["src", "lib"]);
         assert_eq!(opts.exclude, vec!["test"]);
+        assert_eq!(opts.lang, vec!["rust"]);
+        assert!(opts.changed);
+        assert_eq!(opts.cursor.as_deref(), Some("v1:abc:10"));
         assert_eq!(opts.limit, 50);
         assert_eq!(opts.context, 3);
     }

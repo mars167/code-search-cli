@@ -167,6 +167,9 @@ fn build_tree_sitter_edges(backend: &mut PetgraphBackend, workspace: &Workspace)
         exclude: Vec::new(),
         hidden: false,
         no_ignore: false,
+        lang: Vec::new(),
+        changed: false,
+        cursor: None,
         limit: 0,
     };
 

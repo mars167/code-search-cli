@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     cli::{Cli, Command, HooksCommand, IndexCommand},
@@ -13,6 +13,9 @@ pub fn run(cli: Cli) -> AppResult<i32> {
         exclude: cli.exclude.clone(),
         hidden: cli.hidden,
         no_ignore: cli.no_ignore,
+        lang: cli.lang.clone(),
+        changed: cli.changed,
+        cursor: cli.cursor.clone(),
         limit: cli.limit,
     };
     let mut exit_code = 0;
@@ -29,15 +32,18 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             let query_output =
                 search::find(&workspace, &scan_opts, text, mode, cli.context, false)?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
-                "find",
-                "find",
-                json!({ "pattern": text, "mode": mode }),
-                &workspace.snapshot_id,
-                output::source_fact(),
-                query_output.index,
-                query_output.results,
-                Vec::new(),
+            page_response(
+                output::response_with_index(
+                    "find",
+                    "find",
+                    scoped_query(json!({ "pattern": text, "mode": mode }), &scan_opts),
+                    &workspace.snapshot_id,
+                    output::source_fact(),
+                    query_output.index.clone(),
+                    query_output.results.clone(),
+                    Vec::new(),
+                ),
+                query_output,
             )
         }
         Command::Grep {
@@ -48,63 +54,87 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             let context = context.unwrap_or(cli.context);
             let query_output = search::find(&workspace, &scan_opts, pattern, mode, context, false)?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
-                "grep",
-                "find",
-                json!({ "pattern": pattern, "mode": mode, "context": context }),
-                &workspace.snapshot_id,
-                output::source_fact(),
-                query_output.index,
-                query_output.results,
-                Vec::new(),
+            page_response(
+                output::response_with_index(
+                    "grep",
+                    "find",
+                    scoped_query(
+                        json!({ "pattern": pattern, "mode": mode, "context": context }),
+                        &scan_opts,
+                    ),
+                    &workspace.snapshot_id,
+                    output::source_fact(),
+                    query_output.index.clone(),
+                    query_output.results.clone(),
+                    Vec::new(),
+                ),
+                query_output,
             )
         }
         Command::Files { pattern } => {
             let query_output = search::files(&workspace, &scan_opts, pattern, false)?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
-                "files",
-                "files",
-                json!({ "pattern": pattern, "mode": "path_substring" }),
-                &workspace.snapshot_id,
-                output::source_fact(),
-                query_output.index,
-                query_output.results,
-                Vec::new(),
+            page_response(
+                output::response_with_index(
+                    "files",
+                    "files",
+                    scoped_query(
+                        json!({ "pattern": pattern, "mode": "path_substring" }),
+                        &scan_opts,
+                    ),
+                    &workspace.snapshot_id,
+                    output::source_fact(),
+                    query_output.index.clone(),
+                    query_output.results.clone(),
+                    Vec::new(),
+                ),
+                query_output,
             )
         }
         Command::FindPath { pattern } => {
             let query_output = search::files(&workspace, &scan_opts, pattern, false)?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
-                "find-path",
-                "files",
-                json!({ "pattern": pattern, "mode": "path_substring" }),
-                &workspace.snapshot_id,
-                output::source_fact(),
-                query_output.index,
-                query_output.results,
-                Vec::new(),
+            page_response(
+                output::response_with_index(
+                    "find-path",
+                    "files",
+                    scoped_query(
+                        json!({ "pattern": pattern, "mode": "path_substring" }),
+                        &scan_opts,
+                    ),
+                    &workspace.snapshot_id,
+                    output::source_fact(),
+                    query_output.index.clone(),
+                    query_output.results.clone(),
+                    Vec::new(),
+                ),
+                query_output,
             )
         }
         Command::Glob { pattern } => {
             let query_output = search::files(&workspace, &scan_opts, pattern, true)?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
-                "glob",
-                "files",
-                json!({ "pattern": pattern, "mode": "strict_glob" }),
-                &workspace.snapshot_id,
-                output::source_fact(),
-                query_output.index,
-                query_output.results,
-                Vec::new(),
+            page_response(
+                output::response_with_index(
+                    "glob",
+                    "files",
+                    scoped_query(
+                        json!({ "pattern": pattern, "mode": "strict_glob" }),
+                        &scan_opts,
+                    ),
+                    &workspace.snapshot_id,
+                    output::source_fact(),
+                    query_output.index.clone(),
+                    query_output.results.clone(),
+                    Vec::new(),
+                ),
+                query_output,
             )
         }
         Command::List { dir, recursive } => output::response(
             "list",
             "list",
-            json!({ "dir": dir, "recursive": recursive }),
+            scoped_query(json!({ "dir": dir, "recursive": recursive }), &scan_opts),
             &workspace.snapshot_id,
             output::source_fact(),
             search::list(&workspace, &scan_opts, dir.as_deref(), *recursive)?,
@@ -113,7 +143,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
         Command::Tree { dir, depth } => output::response(
             "tree",
             "tree",
-            json!({ "dir": dir, "depth": depth }),
+            scoped_query(json!({ "dir": dir, "depth": depth }), &scan_opts),
             &workspace.snapshot_id,
             output::source_fact(),
             search::tree(&workspace, &scan_opts, dir.as_deref(), *depth)?,
@@ -155,7 +185,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::response_with_index(
                         "refs",
                         "refs",
-                        json!({ "identifier": identifier, "producer": "scip" }),
+                        scoped_query(
+                            json!({ "identifier": identifier, "producer": "scip" }),
+                            &scan_opts,
+                        ),
                         &workspace.snapshot_id,
                         output::precise_fact(),
                         precise.index,
@@ -174,44 +207,71 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 true,
             )?;
             exit_code = output::no_match_exit(&query_output.results);
-            output::response_with_index(
+            page_response(output::response_with_index(
                 "refs",
                 "refs",
-                json!({ "identifier": identifier, "mode": "identifier_boundary_text_search" }),
+                scoped_query(json!({ "identifier": identifier, "mode": "identifier_boundary_text_search" }), &scan_opts),
                 &workspace.snapshot_id,
                 output::source_fact(),
-                query_output.index,
-                query_output.results,
+                query_output.index.clone(),
+                query_output.results.clone(),
                 vec!["refs is identifier-boundary text search unless a precise occurrence index is available".to_string()],
-            )
+            ), query_output)
         }
         Command::Symbols { query } => {
             if let Some(precise) = scip_index::symbols(&workspace, &scan_opts, query)? {
+                let page = search::page_results(
+                    precise.results,
+                    &scan_opts,
+                    "symbols",
+                    json!({ "query": query, "producer": "scip" }),
+                    &workspace.snapshot_id,
+                )?;
                 return emit_response(
                     &cli.output,
-                    output::response_with_index(
-                        "symbols",
-                        "symbols",
-                        json!({ "query": query, "producer": "scip" }),
-                        &workspace.snapshot_id,
-                        output::precise_fact(),
-                        precise.index,
-                        precise.results,
-                        Vec::new(),
+                    output::with_page_meta(
+                        output::response_with_index(
+                            "symbols",
+                            "symbols",
+                            scoped_query(json!({ "query": query, "producer": "scip" }), &scan_opts),
+                            &workspace.snapshot_id,
+                            output::precise_fact(),
+                            precise.index,
+                            page.results.clone(),
+                            Vec::new(),
+                        ),
+                        page.truncated,
+                        page.next_cursor,
+                        page.facets,
                     ),
                     &workspace.root,
                 );
             }
             let (results, warnings) = syntax::symbols(&workspace, &scan_opts, query)?;
-            exit_code = output::no_match_exit(&results);
-            output::response(
-                "symbols",
+            let page = search::page_results(
+                results,
+                &scan_opts,
                 "symbols",
                 json!({ "query": query, "producer": "tree_sitter_parser" }),
                 &workspace.snapshot_id,
-                output::parser_fact(),
-                results,
-                warnings,
+            )?;
+            exit_code = output::no_match_exit(&page.results);
+            output::with_page_meta(
+                output::response(
+                    "symbols",
+                    "symbols",
+                    scoped_query(
+                        json!({ "query": query, "producer": "tree_sitter_parser" }),
+                        &scan_opts,
+                    ),
+                    &workspace.snapshot_id,
+                    output::parser_fact(),
+                    page.results.clone(),
+                    warnings,
+                ),
+                page.truncated,
+                page.next_cursor,
+                page.facets,
             )
         }
         Command::Defs { identifier } => {
@@ -221,7 +281,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     output::response_with_index(
                         "defs",
                         "defs",
-                        json!({ "identifier": identifier, "producer": "scip" }),
+                        scoped_query(
+                            json!({ "identifier": identifier, "producer": "scip" }),
+                            &scan_opts,
+                        ),
                         &workspace.snapshot_id,
                         output::precise_fact(),
                         precise.index,
@@ -236,7 +299,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             output::response(
                 "defs",
                 "defs",
-                json!({ "identifier": identifier, "producer": "tree_sitter_parser_fallback", "fallbackReason": "precise_scip_index_unavailable" }),
+                scoped_query(
+                    json!({ "identifier": identifier, "producer": "tree_sitter_parser_fallback", "fallbackReason": "precise_scip_index_unavailable" }),
+                    &scan_opts,
+                ),
                 &workspace.snapshot_id,
                 output::parser_fact(),
                 results,
@@ -544,4 +610,15 @@ fn emit_response(
     let exit_code = output::no_match_exit(&value["results"]);
     output::emit(format, &value)?;
     Ok(exit_code)
+}
+
+fn page_response(value: Value, page: search::QueryOutput) -> Value {
+    output::with_page_meta(value, page.truncated, page.next_cursor, page.facets)
+}
+
+fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {
+    if let Some(object) = query.as_object_mut() {
+        object.insert("scope".to_string(), search::scope_value(opts));
+    }
+    query
 }

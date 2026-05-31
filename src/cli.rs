@@ -23,6 +23,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_ignore: bool,
 
+    #[arg(long, global = true)]
+    pub lang: Vec<String>,
+
+    #[arg(long, global = true)]
+    pub changed: bool,
+
+    #[arg(long, global = true)]
+    pub cursor: Option<String>,
+
     #[arg(long, global = true, default_value_t = 100)]
     pub limit: usize,
 

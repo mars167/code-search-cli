@@ -17,6 +17,9 @@ pub struct ScanOptions {
     pub exclude: Vec<String>,
     pub hidden: bool,
     pub no_ignore: bool,
+    pub lang: Vec<String>,
+    pub changed: bool,
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -143,13 +146,20 @@ impl Workspace {
             if !matches_filters(&rel, &opts.include, &opts.exclude) {
                 continue;
             }
+            let language = language_for_path(path).to_string();
+            if !matches_lang(&language, &opts.lang) {
+                continue;
+            }
+            if opts.changed && !self.changed.iter().any(|changed| changed.path == rel) {
+                continue;
+            }
             if is_probably_binary(path) {
                 continue;
             }
             let metadata = fs::metadata(path)?;
             files.push(FileCatalogRecord {
                 path: rel,
-                language: language_for_path(path).to_string(),
+                language,
                 size: metadata.len(),
                 mtime_ms: mtime_ms(&metadata),
                 mode: file_mode(&metadata),
@@ -227,6 +237,13 @@ impl Workspace {
             total_seen += 1;
             let rel = self.rel_path(path);
             if !matches_filters(&rel, &opts.include, &opts.exclude) {
+                continue;
+            }
+            let language = language_for_path(path).to_string();
+            if !matches_lang(&language, &opts.lang) {
+                continue;
+            }
+            if opts.changed && !self.changed.iter().any(|changed| changed.path == rel) {
                 continue;
             }
             match probably_binary_result(path) {
@@ -364,6 +381,13 @@ pub fn matches_filters(path: &str, include: &[String], exclude: &[String]) -> bo
         return false;
     }
     include.is_empty() || include.iter().any(|pattern| path.contains(pattern))
+}
+
+pub fn matches_lang(language: &str, lang: &[String]) -> bool {
+    lang.is_empty()
+        || lang
+            .iter()
+            .any(|expected| expected.eq_ignore_ascii_case(language))
 }
 
 fn is_generated_path(path: &Path) -> bool {

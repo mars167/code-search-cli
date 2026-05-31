@@ -9,11 +9,13 @@ use globset::Glob;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::{
     index,
     workspace::{
-        language_for_path, matches_filters, FileCatalogRecord, FileRecord, ScanOptions, Workspace,
+        language_for_path, matches_filters, matches_lang, FileCatalogRecord, FileRecord,
+        ScanOptions, Workspace,
     },
 };
 
@@ -23,6 +25,16 @@ const MAX_PREVIEW_CHARS: usize = 240;
 pub struct QueryOutput {
     pub results: Value,
     pub index: Value,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub facets: Value,
+}
+
+pub struct Page {
+    pub results: Value,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub facets: Value,
 }
 
 pub fn files(
@@ -55,14 +67,18 @@ pub fn files(
                 "exact": true
             }));
         }
-        if opts.limit > 0 && results.len() >= opts.limit {
-            break;
-        }
     }
-    Ok(QueryOutput {
-        results: Value::Array(results),
-        index: source.index,
-    })
+    paged_query_output(
+        results,
+        source.index,
+        opts,
+        &pagination_scope(
+            if strict_glob { "glob" } else { "files" },
+            json!({ "pattern": pattern, "strictGlob": strict_glob }),
+            opts,
+            &workspace.snapshot_id,
+        ),
+    )
 }
 
 pub fn list(
@@ -229,18 +245,19 @@ pub fn find(
                 "reliability": "source_fact",
                 "exact": true
             }));
-            if opts.limit > 0 && results.len() >= opts.limit {
-                return Ok(QueryOutput {
-                    results: Value::Array(results),
-                    index: source.index,
-                });
-            }
         }
     }
-    Ok(QueryOutput {
-        results: Value::Array(results),
-        index: source.index,
-    })
+    paged_query_output(
+        results,
+        source.index,
+        opts,
+        &pagination_scope(
+            if refs_mode { "refs" } else { "find" },
+            json!({ "pattern": pattern, "mode": mode, "context": context }),
+            opts,
+            &workspace.snapshot_id,
+        ),
+    )
 }
 
 pub fn changed(workspace: &Workspace) -> Result<Value> {
@@ -378,6 +395,212 @@ fn rel_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn paged_query_output(
+    results: Vec<Value>,
+    index: Value,
+    opts: &ScanOptions,
+    scope: &str,
+) -> Result<QueryOutput> {
+    let page = page_results_vec(results, opts, scope)?;
+    Ok(QueryOutput {
+        results: page.results,
+        index,
+        truncated: page.truncated,
+        next_cursor: page.next_cursor,
+        facets: page.facets,
+    })
+}
+
+pub fn page_results(
+    results: Value,
+    opts: &ScanOptions,
+    kind: &str,
+    args: Value,
+    snapshot_id: &str,
+) -> Result<Page> {
+    let Value::Array(results) = results else {
+        return Ok(Page {
+            results,
+            truncated: false,
+            next_cursor: None,
+            facets: result_facets(&[]),
+        });
+    };
+    page_results_vec(
+        results,
+        opts,
+        &pagination_scope(kind, args, opts, snapshot_id),
+    )
+}
+
+fn page_results_vec(mut results: Vec<Value>, opts: &ScanOptions, scope: &str) -> Result<Page> {
+    sort_results(&mut results);
+    let result_set_hash = value_hash(&Value::Array(results.clone()));
+    let scope = format!("{scope}|resultSet:{result_set_hash}");
+    let facets = result_facets(&results);
+    let offset = cursor_offset(opts.cursor.as_deref(), &scope)?;
+    let total = results.len();
+    let limit = opts.limit;
+    let end = if limit == 0 {
+        total
+    } else {
+        offset.saturating_add(limit).min(total)
+    };
+    let page = if offset >= total {
+        Vec::new()
+    } else {
+        results[offset..end].to_vec()
+    };
+    let truncated = limit > 0 && end < total;
+    let next_cursor = truncated.then(|| encode_cursor(end, &scope));
+    Ok(Page {
+        results: Value::Array(page),
+        truncated,
+        next_cursor,
+        facets,
+    })
+}
+
+fn cursor_offset(cursor: Option<&str>, scope: &str) -> Result<usize> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let Some(rest) = cursor.strip_prefix("v1:") else {
+        return Err(anyhow!("invalid cursor: {cursor}"));
+    };
+    let Some((cursor_scope_hash, offset)) = rest.split_once(':') else {
+        return Err(anyhow!("invalid cursor: {cursor}"));
+    };
+    if cursor_scope_hash != scope_hash(scope) {
+        return Err(anyhow!("cursor does not match query scope"));
+    }
+    offset
+        .parse::<usize>()
+        .with_context(|| format!("invalid cursor: {cursor}"))
+}
+
+fn encode_cursor(offset: usize, scope: &str) -> String {
+    format!("v1:{}:{offset}", scope_hash(scope))
+}
+
+fn scope_hash(scope: &str) -> String {
+    let digest = Sha256::digest(scope.as_bytes());
+    digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn value_hash(value: &Value) -> String {
+    let serialized = serde_json::to_vec(value).unwrap_or_default();
+    let digest = Sha256::digest(&serialized);
+    digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn pagination_scope(kind: &str, args: Value, opts: &ScanOptions, snapshot_id: &str) -> String {
+    json!({
+        "kind": kind,
+        "args": args,
+        "snapshotId": snapshot_id,
+        "scope": pagination_scope_value(opts)
+    })
+    .to_string()
+}
+
+pub fn scope_value(opts: &ScanOptions) -> Value {
+    json!({
+        "include": &opts.include,
+        "exclude": &opts.exclude,
+        "lang": &opts.lang,
+        "changed": opts.changed,
+        "hidden": opts.hidden,
+        "noIgnore": opts.no_ignore,
+        "cursor": &opts.cursor,
+        "limit": opts.limit
+    })
+}
+
+fn pagination_scope_value(opts: &ScanOptions) -> Value {
+    json!({
+        "include": &opts.include,
+        "exclude": &opts.exclude,
+        "lang": &opts.lang,
+        "changed": opts.changed,
+        "hidden": opts.hidden,
+        "noIgnore": opts.no_ignore,
+        "limit": opts.limit
+    })
+}
+
+fn sort_results(results: &mut [Value]) {
+    results.sort_by(|left, right| result_sort_key(left).cmp(&result_sort_key(right)));
+}
+
+fn result_sort_key(value: &Value) -> (String, u64, u64, String) {
+    (
+        value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        value
+            .pointer("/range/start/line")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        value
+            .pointer("/range/start/column")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        value
+            .get("matchText")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
+fn result_facets(results: &[Value]) -> Value {
+    json!({
+        "language": count_facet(results, |result| result.get("language").and_then(Value::as_str).map(ToString::to_string)),
+        "topDir": count_facet(results, |result| {
+            result.get("path").and_then(Value::as_str).map(|path| {
+                path.split('/').next().filter(|value| !value.is_empty()).unwrap_or(".").to_string()
+            })
+        }),
+        "fileType": count_facet(results, |result| {
+            result.get("path").and_then(Value::as_str).map(|path| {
+                Path::new(path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .filter(|ext| !ext.is_empty())
+                    .unwrap_or("none")
+                    .to_string()
+            })
+        }),
+        "producer": count_facet(results, |result| result.get("producer").and_then(Value::as_str).map(ToString::to_string)),
+        "reliability": count_facet(results, |result| result.get("reliability").and_then(Value::as_str).map(ToString::to_string))
+    })
+}
+
+fn count_facet(results: &[Value], value_for: impl Fn(&Value) -> Option<String>) -> Value {
+    let mut counts = std::collections::BTreeMap::<String, u64>::new();
+    for result in results {
+        if let Some(value) = value_for(result) {
+            *counts.entry(value).or_default() += 1;
+        }
+    }
+    Value::Array(
+        counts
+            .into_iter()
+            .map(|(value, count)| json!({ "value": value, "count": count }))
+            .collect(),
+    )
+}
+
 struct CandidateFiles {
     records: Vec<FileRecord>,
     index: Value,
@@ -421,11 +644,16 @@ fn candidate_file_catalog(
     workspace: &Workspace,
     opts: &ScanOptions,
 ) -> Result<CandidateFileCatalog> {
-    if let Some((records, index)) = index::fresh_file_records(workspace, opts)? {
-        return Ok(CandidateFileCatalog {
-            records: filter_file_entries(records.into_iter().map(FileEntry::from).collect(), opts),
-            index,
-        });
+    if !opts.changed {
+        if let Some((records, index)) = index::fresh_file_records(workspace, opts)? {
+            return Ok(CandidateFileCatalog {
+                records: filter_file_entries(
+                    records.into_iter().map(FileEntry::from).collect(),
+                    opts,
+                ),
+                index,
+            });
+        }
     }
 
     let mut scan_opts = opts.clone();
@@ -446,11 +674,13 @@ fn candidate_text_files(
     pattern: &str,
     mode: &str,
 ) -> Result<CandidateFiles> {
-    if let Some((records, index)) = index::fresh_text_records(workspace, opts, pattern, mode)? {
-        return Ok(CandidateFiles {
-            records: filter_records(records, opts),
-            index,
-        });
+    if !opts.changed {
+        if let Some((records, index)) = index::fresh_text_records(workspace, opts, pattern, mode)? {
+            return Ok(CandidateFiles {
+                records: filter_records(records, opts),
+                index,
+            });
+        }
     }
 
     let mut scan_opts = opts.clone();
@@ -480,6 +710,7 @@ fn filter_records(records: Vec<FileRecord>, opts: &ScanOptions) -> Vec<FileRecor
                         .include
                         .iter()
                         .any(|pattern| record.path.contains(pattern)))
+                && matches_lang(&record.language, &opts.lang)
         })
         .collect()
 }
@@ -497,6 +728,7 @@ fn filter_file_entries(records: Vec<FileEntry>, opts: &ScanOptions) -> Vec<FileE
                         .include
                         .iter()
                         .any(|pattern| record.path.contains(pattern)))
+                && matches_lang(&record.language, &opts.lang)
         })
         .collect()
 }

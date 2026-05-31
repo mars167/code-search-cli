@@ -27,6 +27,12 @@ pub struct QueryOptions {
     pub include: Vec<String>,
     /// Path substrings that exclude files.
     pub exclude: Vec<String>,
+    /// Language names to include.
+    pub lang: Vec<String>,
+    /// Restrict to git changed files.
+    pub changed: bool,
+    /// Pagination cursor.
+    pub cursor: Option<String>,
     /// Maximum number of result items.
     pub limit: usize,
     /// Number of surrounding context lines (grep / find).
@@ -38,6 +44,9 @@ impl Default for QueryOptions {
         Self {
             include: vec![],
             exclude: vec![],
+            lang: vec![],
+            changed: false,
+            cursor: None,
             limit: 100,
             context: 0,
         }
@@ -49,6 +58,9 @@ impl QueryOptions {
         ScanOptions {
             include: self.include.clone(),
             exclude: self.exclude.clone(),
+            lang: self.lang.clone(),
+            changed: self.changed,
+            cursor: self.cursor.clone(),
             hidden: false,
             no_ignore: false,
             limit: self.limit,
@@ -89,15 +101,21 @@ impl QueryService {
     pub fn find(&self, text: &str, opts: &QueryOptions) -> Result<Value> {
         let scan = opts.to_scan_options();
         let qo = search::find(&self.workspace, &scan, text, "literal", opts.context, false)?;
-        Ok(self.finalize(output::response_with_index(
+        let response = output::response_with_index(
             "find",
             "find",
-            json!({ "pattern": text, "mode": "literal" }),
+            scoped_query(json!({ "pattern": text, "mode": "literal" }), &scan),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            qo.index,
-            qo.results,
+            qo.index.clone(),
+            qo.results.clone(),
             Vec::new(),
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            qo.truncated,
+            qo.next_cursor,
+            qo.facets,
         )))
     }
 
@@ -112,15 +130,24 @@ impl QueryService {
             opts.context,
             false,
         )?;
-        Ok(self.finalize(output::response_with_index(
+        let response = output::response_with_index(
             "grep",
             "find",
-            json!({ "pattern": pattern, "mode": "regex", "context": opts.context }),
+            scoped_query(
+                json!({ "pattern": pattern, "mode": "regex", "context": opts.context }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            qo.index,
-            qo.results,
+            qo.index.clone(),
+            qo.results.clone(),
             Vec::new(),
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            qo.truncated,
+            qo.next_cursor,
+            qo.facets,
         )))
     }
 
@@ -128,15 +155,24 @@ impl QueryService {
     pub fn files(&self, pattern: &str, opts: &QueryOptions) -> Result<Value> {
         let scan = opts.to_scan_options();
         let qo = search::files(&self.workspace, &scan, pattern, false)?;
-        Ok(self.finalize(output::response_with_index(
+        let response = output::response_with_index(
             "files",
             "files",
-            json!({ "pattern": pattern, "mode": "path_substring" }),
+            scoped_query(
+                json!({ "pattern": pattern, "mode": "path_substring" }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            qo.index,
-            qo.results,
+            qo.index.clone(),
+            qo.results.clone(),
             Vec::new(),
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            qo.truncated,
+            qo.next_cursor,
+            qo.facets,
         )))
     }
 
@@ -144,15 +180,21 @@ impl QueryService {
     pub fn glob(&self, pattern: &str, opts: &QueryOptions) -> Result<Value> {
         let scan = opts.to_scan_options();
         let qo = search::files(&self.workspace, &scan, pattern, true)?;
-        Ok(self.finalize(output::response_with_index(
+        let response = output::response_with_index(
             "glob",
             "files",
-            json!({ "pattern": pattern, "mode": "strict_glob" }),
+            scoped_query(json!({ "pattern": pattern, "mode": "strict_glob" }), &scan),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            qo.index,
-            qo.results,
+            qo.index.clone(),
+            qo.results.clone(),
             Vec::new(),
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            qo.truncated,
+            qo.next_cursor,
+            qo.facets,
         )))
     }
 
@@ -249,7 +291,10 @@ impl QueryService {
             return Ok(self.finalize(output::response_with_index(
                 "refs",
                 "refs",
-                json!({ "identifier": identifier, "producer": "scip" }),
+                scoped_query(
+                    json!({ "identifier": identifier, "producer": "scip" }),
+                    &scan,
+                ),
                 &self.workspace.snapshot_id,
                 output::precise_fact(),
                 precise.index,
@@ -267,16 +312,25 @@ impl QueryService {
             opts.context,
             true,
         )?;
-        Ok(self.finalize(output::response_with_index(
+        let response = output::response_with_index(
             "refs",
             "refs",
-            json!({ "identifier": identifier, "mode": "identifier_boundary_text_search" }),
+            scoped_query(
+                json!({ "identifier": identifier, "mode": "identifier_boundary_text_search" }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            qo.index,
-            qo.results,
+            qo.index.clone(),
+            qo.results.clone(),
             vec!["refs is identifier-boundary text search unless a precise occurrence index is available"
                 .to_string()],
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            qo.truncated,
+            qo.next_cursor,
+            qo.facets,
         )))
     }
 
@@ -286,28 +340,57 @@ impl QueryService {
 
         // 1. Try SCIP precise index first.
         if let Some(precise) = scip_index::symbols(&self.workspace, &scan, query)? {
-            return Ok(self.finalize(output::response_with_index(
-                "symbols",
+            let page = search::page_results(
+                precise.results,
+                &scan,
                 "symbols",
                 json!({ "query": query, "producer": "scip" }),
                 &self.workspace.snapshot_id,
+            )?;
+            let response = output::response_with_index(
+                "symbols",
+                "symbols",
+                scoped_query(json!({ "query": query, "producer": "scip" }), &scan),
+                &self.workspace.snapshot_id,
                 output::precise_fact(),
                 precise.index,
-                precise.results,
+                page.results.clone(),
                 Vec::new(),
+            );
+            return Ok(self.finalize(output::with_page_meta(
+                response,
+                page.truncated,
+                page.next_cursor,
+                page.facets,
             )));
         }
 
         // 2. Fall back to tree-sitter.
         let (results, warnings) = syntax::symbols(&self.workspace, &scan, query)?;
-        Ok(self.finalize(output::response(
-            "symbols",
+        let page = search::page_results(
+            results,
+            &scan,
             "symbols",
             json!({ "query": query, "producer": "tree_sitter_parser" }),
             &self.workspace.snapshot_id,
+        )?;
+        let response = output::response(
+            "symbols",
+            "symbols",
+            scoped_query(
+                json!({ "query": query, "producer": "tree_sitter_parser" }),
+                &scan,
+            ),
+            &self.workspace.snapshot_id,
             output::parser_fact(),
-            results,
+            page.results.clone(),
             warnings,
+        );
+        Ok(self.finalize(output::with_page_meta(
+            response,
+            page.truncated,
+            page.next_cursor,
+            page.facets,
         )))
     }
 
@@ -416,6 +499,13 @@ impl QueryService {
             Vec::new(),
         )))
     }
+}
+
+fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {
+    if let Some(object) = query.as_object_mut() {
+        object.insert("scope".to_string(), search::scope_value(opts));
+    }
+    query
 }
 
 // ---------------------------------------------------------------------------

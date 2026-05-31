@@ -316,6 +316,392 @@ fn list_and_tree_respect_hidden_no_ignore_and_filters() {
 }
 
 #[test]
+fn lang_scope_filters_find_and_is_echoed() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "let value = \"needle\";\n").unwrap();
+    fs::write(dir.path().join("src/app.py"), "value = 'needle'\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--lang")
+        .arg("rust")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["query"]["scope"]["lang"], json!(["rust"]));
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+    assert_eq!(json["results"][0]["path"], "src/lib.rs");
+}
+
+#[test]
+fn lang_scope_filters_symbols() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(dir.path().join("src/app.py"), "def alpha():\n    pass\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--lang")
+        .arg("rust")
+        .args(["symbols", "alpha"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let paths: Vec<&str> = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|result| result["path"].as_str())
+        .collect();
+
+    assert_eq!(json["query"]["scope"]["lang"], json!(["rust"]));
+    assert_eq!(paths, vec!["src/lib.rs"]);
+}
+
+#[test]
+fn changed_scope_searches_only_git_changed_files() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+    fs::write(
+        dir.path().join("src/clean.rs"),
+        "fn clean() { /* needle */ }\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src/clean.rs"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+    fs::write(
+        dir.path().join("src/changed.rs"),
+        "fn changed() { /* needle */ }\n",
+    )
+    .unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--changed")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let paths: Vec<&str> = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|result| result["path"].as_str())
+        .collect();
+
+    assert_eq!(json["query"]["scope"]["changed"], true);
+    assert_eq!(paths, vec!["src/changed.rs"]);
+}
+
+#[test]
+fn cursor_paginates_stably_and_reports_facets() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    for path in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+        fs::write(dir.path().join(path), "needle\n").unwrap();
+    }
+
+    let first_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first_output).unwrap();
+    let cursor = first["nextCursor"].as_str().unwrap().to_string();
+
+    assert_eq!(first["truncated"], true);
+    assert_eq!(first["summary"]["resultCount"], 1);
+    assert_eq!(first["results"][0]["path"], "src/a.rs");
+    assert!(first["summary"]["facets"]["language"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|facet| facet["value"] == "rust" && facet["count"] == 3));
+
+    let second_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--cursor")
+        .arg(cursor)
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second: Value = serde_json::from_slice(&second_output).unwrap();
+
+    assert_eq!(second["results"][0]["path"], "src/b.rs");
+    assert_ne!(first["results"][0]["path"], second["results"][0]["path"]);
+    assert_eq!(second["truncated"], true);
+    assert!(second["nextCursor"].as_str().is_some());
+}
+
+#[test]
+fn cursor_rejects_query_scope_mismatch() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "needle\nother\n").unwrap();
+    fs::write(dir.path().join("b.txt"), "needle\n").unwrap();
+
+    let first_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first_output).unwrap();
+    let cursor = first["nextCursor"].as_str().unwrap();
+
+    let mismatch_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--cursor")
+        .arg(cursor)
+        .args(["find", "other"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&mismatch_output).unwrap();
+
+    assert_eq!(json["error"]["code"], "cursor_does_not_match_query_scope");
+}
+
+#[test]
+fn cursor_rejects_snapshot_mismatch_after_worktree_changes() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("src/a.rs"), "needle\n").unwrap();
+    fs::write(dir.path().join("src/b.rs"), "needle\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    let first_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first_output).unwrap();
+    let cursor = first["nextCursor"].as_str().unwrap();
+
+    fs::write(dir.path().join("src/aa.rs"), "needle\n").unwrap();
+
+    let mismatch_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--cursor")
+        .arg(cursor)
+        .args(["find", "needle"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&mismatch_output).unwrap();
+
+    assert_eq!(json["error"]["code"], "cursor_does_not_match_query_scope");
+}
+
+#[test]
+fn cursor_rejects_dirty_worktree_result_set_changes() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.email", "test@test.com"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["config", "user.name", "Test"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("README.md"), "base\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "README.md"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+    fs::write(dir.path().join("src/a.rs"), "needle\n").unwrap();
+    fs::write(dir.path().join("src/b.rs"), "needle\n").unwrap();
+
+    let first_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first_output).unwrap();
+    let cursor = first["nextCursor"].as_str().unwrap();
+    let first_snapshot = first["snapshot_id"].as_str().unwrap().to_string();
+
+    fs::write(dir.path().join("src/aa.rs"), "needle\n").unwrap();
+
+    let mismatch_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--limit")
+        .arg("1")
+        .arg("--cursor")
+        .arg(cursor)
+        .args(["find", "needle"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&mismatch_output).unwrap();
+
+    assert!(first_snapshot.starts_with("worktree:"));
+    assert_eq!(json["error"]["code"], "cursor_does_not_match_query_scope");
+}
+
+#[test]
+fn jsonl_summary_includes_cursor_and_facets() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a.rs"), "needle\n").unwrap();
+    fs::write(dir.path().join("b.rs"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("jsonl")
+        .arg("--limit")
+        .arg("1")
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let lines = String::from_utf8(output).unwrap();
+    let summary: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+
+    assert_eq!(summary["event"], "summary");
+    assert_eq!(summary["truncated"], true);
+    assert!(summary["nextCursor"].as_str().is_some());
+    assert!(summary["summary"]["facets"]["language"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|facet| facet["value"] == "rust" && facet["count"] == 2));
+}
+
+#[test]
 fn json_output_includes_read_suggestions_and_next_actions() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();

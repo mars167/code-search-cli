@@ -132,6 +132,20 @@ pub fn response_with_index(
     })
 }
 
+pub fn with_page_meta(
+    mut value: Value,
+    truncated: bool,
+    next_cursor: Option<String>,
+    facets: Value,
+) -> Value {
+    value["truncated"] = Value::Bool(truncated);
+    value["nextCursor"] = next_cursor.map(Value::String).unwrap_or(Value::Null);
+    if let Some(summary) = value.get_mut("summary").and_then(Value::as_object_mut) {
+        summary.insert("facets".to_string(), facets);
+    }
+    value
+}
+
 fn live_scan_index() -> Value {
     json!({
         "used": false,

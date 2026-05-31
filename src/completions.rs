@@ -64,7 +64,7 @@ fn bash() -> String {
   esac
 
   if [[ "$cur" == -* ]]; then
-    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --limit --context --help --version" -- "$cur") )
+    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --limit --context --help --version" -- "$cur") )
   else
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   fi
@@ -121,6 +121,9 @@ fn fish() -> String {
         "complete -c code-search -l exclude -r".to_string(),
         "complete -c code-search -l hidden".to_string(),
         "complete -c code-search -l no-ignore".to_string(),
+        "complete -c code-search -l lang -r".to_string(),
+        "complete -c code-search -l changed".to_string(),
+        "complete -c code-search -l cursor -r".to_string(),
         "complete -c code-search -l limit -r".to_string(),
         "complete -c code-search -l context -r".to_string(),
     ];
