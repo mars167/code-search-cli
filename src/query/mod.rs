@@ -217,16 +217,35 @@ impl QueryService {
         )))
     }
 
-    /// List directory contents (non-recursive).
-    pub fn list_dir(&self, dir: &str) -> Result<Value> {
-        let scan = QueryOptions::default().to_scan_options();
+    /// List directory contents.
+    pub fn list(&self, dir: Option<&str>, recursive: bool, opts: &QueryOptions) -> Result<Value> {
+        let scan = opts.to_scan_options();
         Ok(self.finalize(output::response(
             "list",
             "list",
-            json!({ "dir": dir, "recursive": false }),
+            scoped_query(json!({ "dir": dir, "recursive": recursive }), &scan),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            search::list(&self.workspace, &scan, Some(dir), false)?,
+            search::list(&self.workspace, &scan, dir, recursive)?,
+            Vec::new(),
+        )))
+    }
+
+    /// List directory contents (non-recursive).
+    pub fn list_dir(&self, dir: &str) -> Result<Value> {
+        self.list(Some(dir), false, &QueryOptions::default())
+    }
+
+    /// Return a recursive tree view.
+    pub fn tree(&self, dir: Option<&str>, depth: Option<u8>, opts: &QueryOptions) -> Result<Value> {
+        let scan = opts.to_scan_options();
+        Ok(self.finalize(output::response(
+            "tree",
+            "tree",
+            scoped_query(json!({ "dir": dir, "depth": depth }), &scan),
+            &self.workspace.snapshot_id,
+            output::source_fact(),
+            search::tree(&self.workspace, &scan, dir, depth)?,
             Vec::new(),
         )))
     }
@@ -466,14 +485,18 @@ impl QueryService {
 
     /// Return a list of changed / dirty files (git-status porcelain).
     pub fn changed(&self) -> Result<Value> {
-        Ok(self.finalize(output::response(
+        Ok(self.finalize(output::with_summary_field(
+            output::response(
+                "changed",
+                "changed",
+                json!({}),
+                &self.workspace.snapshot_id,
+                output::source_fact(),
+                search::changed(&self.workspace)?,
+                Vec::new(),
+            ),
             "changed",
-            "changed",
-            json!({}),
-            &self.workspace.snapshot_id,
-            output::source_fact(),
-            search::changed(&self.workspace)?,
-            Vec::new(),
+            search::changed_summary(&self.workspace),
         )))
     }
 

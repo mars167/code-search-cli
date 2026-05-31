@@ -3153,6 +3153,114 @@ fn mcp_subcommand_is_registered_in_help() {
     );
 }
 
+#[test]
+fn mcp_stdio_find_matches_cli_core_json_and_read_flow() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    let needle = 42;\n}\n",
+    )
+    .unwrap();
+
+    let cli_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cli_json: Value = serde_json::from_slice(&cli_output).unwrap();
+
+    let find_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "code_search_find",
+            "arguments": { "text": "needle" }
+        }
+    });
+    let first_output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("mcp")
+        .write_stdin(format!("{find_request}\n"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_stdout = String::from_utf8(first_output).unwrap();
+    let first_line: Value = serde_json::from_str(first_stdout.lines().next().unwrap()).unwrap();
+    let first_find: Value =
+        serde_json::from_str(first_line["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let read_target = first_find["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["kind"] == "read")
+        .and_then(|action| action["argv"].as_array())
+        .and_then(|argv| argv.last())
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+    let read_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "code_search_read",
+            "arguments": { "target": read_target }
+        }
+    });
+    let stdin = format!("{find_request}\n{read_request}\n");
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("mcp")
+        .write_stdin(stdin)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+
+    let mcp_find: Value =
+        serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(mcp_find["command"], cli_json["command"]);
+    assert_eq!(mcp_find["canonicalCommand"], cli_json["canonicalCommand"]);
+    assert_eq!(mcp_find["query"], cli_json["query"]);
+    assert_eq!(
+        mcp_find["results"][0]["path"],
+        cli_json["results"][0]["path"]
+    );
+    assert_eq!(
+        mcp_find["results"][0]["range"],
+        cli_json["results"][0]["range"]
+    );
+    assert!(mcp_find["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "read"));
+
+    let mcp_read: Value =
+        serde_json::from_str(lines[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(mcp_read["command"], "read");
+    assert!(mcp_read["results"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("needle"));
+}
+
 // ---------------------------------------------------------------------------
 // MR-08 Remote/Pack mode tests
 // ---------------------------------------------------------------------------

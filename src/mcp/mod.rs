@@ -27,7 +27,10 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::query::{QueryOptions, QueryService};
+use crate::{
+    output,
+    query::{QueryOptions, QueryService},
+};
 
 mod protocol;
 
@@ -65,8 +68,8 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" },
-                    "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" },
+                    "context": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Lines of context around each match" }
                 },
                 "required": ["text"]
             }),
@@ -85,8 +88,8 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" },
-                    "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" },
+                    "context": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Lines of context around each match" }
                 },
                 "required": ["pattern"]
             }),
@@ -106,7 +109,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
             }),
@@ -125,9 +128,43 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
+            }),
+        },
+        ToolDef {
+            name: "code_search_list".to_string(),
+            description:
+                "List directory contents in the workspace. Returns path facts with file/directory metadata."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dir": { "type": "string", "default": ".", "description": "Directory to list relative to the workspace root" },
+                    "recursive": { "type": "boolean", "default": false, "description": "List recursively" },
+                    "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
+                    "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
+                },
+                "required": []
+            }),
+        },
+        ToolDef {
+            name: "code_search_tree".to_string(),
+            description:
+                "Return a recursive tree view for a workspace directory."
+                    .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dir": { "type": "string", "default": ".", "description": "Directory to traverse relative to the workspace root" },
+                    "depth": { "type": "integer", "minimum": 0, "maximum": 255, "description": "Maximum traversal depth" },
+                    "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
+                    "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
+                },
+                "required": []
             }),
         },
         ToolDef {
@@ -158,7 +195,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
             }),
@@ -178,7 +215,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
             }),
@@ -198,7 +235,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
                     "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["query"]
             }),
@@ -214,7 +251,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "identifier": { "type": "string", "description": "Function/symbol name to query outgoing calls for" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
             }),
@@ -230,7 +267,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "identifier": { "type": "string", "description": "Function/symbol name to query incoming callers for" },
                     "include": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to include" },
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Path substrings to exclude" },
-                    "limit": { "type": "integer", "default": 100, "description": "Max results" }
+                    "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
             }),
@@ -412,69 +449,82 @@ impl Server {
 
     /// Execute a named tool with optional arguments.
     fn execute_tool(&self, name: &str, args: Option<&Value>) -> Result<ToolCallResult> {
-        let opts = parse_query_options(args);
+        match self.execute_tool_value(name, args) {
+            Ok(query_result) => Ok(tool_result(query_result, false)),
+            Err(error) => Ok(tool_result(output::error_response(error), true)),
+        }
+    }
 
-        let query_result = match name {
+    fn execute_tool_value(&self, name: &str, args: Option<&Value>) -> Result<Value> {
+        let opts = parse_query_options(args)?;
+
+        match name {
             "code_search_find" => {
                 let text = required_str(args, "text")?;
-                self.service.find(text, &opts)?
+                self.service.find(text, &opts)
             }
             "code_search_grep" => {
                 let pattern = required_str(args, "pattern")?;
-                self.service.grep(pattern, &opts)?
+                self.service.grep(pattern, &opts)
             }
             "code_search_files" => {
                 let pattern = required_str(args, "pattern")?;
-                self.service.files(pattern, &opts)?
+                self.service.files(pattern, &opts)
             }
             "code_search_glob" => {
                 let pattern = required_str(args, "pattern")?;
-                self.service.glob(pattern, &opts)?
+                self.service.glob(pattern, &opts)
+            }
+            "code_search_list" => {
+                reject_unsupported_browse_scope(&opts)?;
+                let dir = optional_str(args, "dir");
+                let recursive = optional_bool(args, "recursive").unwrap_or(false);
+                self.service.list(dir, recursive, &opts)
+            }
+            "code_search_tree" => {
+                reject_unsupported_browse_scope(&opts)?;
+                let dir = optional_str(args, "dir");
+                let depth = optional_depth(args)?;
+                self.service.tree(dir, depth, &opts)
             }
             "code_search_read" => {
                 let target = required_str(args, "target")?;
-                self.service.read_file(target)?
+                self.service.read_file(target)
             }
             "code_search_defs" => {
                 let identifier = required_str(args, "identifier")?;
-                self.service.defs(identifier, &opts)?
+                self.service.defs(identifier, &opts)
             }
             "code_search_refs" => {
                 let identifier = required_str(args, "identifier")?;
-                self.service.refs(identifier, &opts)?
+                self.service.refs(identifier, &opts)
             }
             "code_search_symbols" => {
                 let query = required_str(args, "query")?;
-                self.service.symbols(query, &opts)?
+                self.service.symbols(query, &opts)
             }
             "code_search_calls" => {
                 let identifier = required_str(args, "identifier")?;
-                self.service.calls(identifier, &opts)?
+                self.service.calls(identifier, &opts)
             }
             "code_search_callers" => {
                 let identifier = required_str(args, "identifier")?;
-                self.service.callers(identifier, &opts)?
+                self.service.callers(identifier, &opts)
             }
-            "code_search_changed" => self.service.changed()?,
-            "code_search_status" => self.service.status()?,
-            _ => {
-                return Ok(ToolCallResult {
-                    content: vec![ToolResultContent {
-                        content_type: "text".to_string(),
-                        text: format!("Unknown tool: {name}"),
-                    }],
-                    is_error: true,
-                });
-            }
-        };
+            "code_search_changed" => self.service.changed(),
+            "code_search_status" => self.service.status(),
+            _ => Err(anyhow::anyhow!("unknown tool: {name}")),
+        }
+    }
+}
 
-        Ok(ToolCallResult {
-            content: vec![ToolResultContent {
-                content_type: "text".to_string(),
-                text: query_result.to_string(),
-            }],
-            is_error: false,
-        })
+fn tool_result(value: Value, is_error: bool) -> ToolCallResult {
+    ToolCallResult {
+        content: vec![ToolResultContent {
+            content_type: "text".to_string(),
+            text: value.to_string(),
+        }],
+        is_error,
     }
 }
 
@@ -495,14 +545,55 @@ fn required_str<'a>(args: Option<&'a Value>, field: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow::anyhow!("argument '{field}' must be a string"))
 }
 
+fn optional_str<'a>(args: Option<&'a Value>, field: &str) -> Option<&'a str> {
+    args.and_then(Value::as_object)?
+        .get(field)
+        .and_then(Value::as_str)
+}
+
+fn optional_bool(args: Option<&Value>, field: &str) -> Option<bool> {
+    args.and_then(Value::as_object)?
+        .get(field)
+        .and_then(Value::as_bool)
+}
+
+fn optional_depth(args: Option<&Value>) -> Result<Option<u8>> {
+    let Some(depth_value) = args
+        .and_then(Value::as_object)
+        .and_then(|obj| obj.get("depth"))
+    else {
+        return Ok(None);
+    };
+    let Some(depth) = depth_value.as_u64() else {
+        return Err(anyhow::anyhow!(
+            "invalid_mcp_argument: depth must be an integer between 0 and 255"
+        ));
+    };
+    if depth > u8::MAX as u64 {
+        return Err(anyhow::anyhow!(
+            "invalid_mcp_argument: depth must be between 0 and 255"
+        ));
+    }
+    Ok(Some(depth as u8))
+}
+
+fn reject_unsupported_browse_scope(opts: &QueryOptions) -> Result<()> {
+    if !opts.lang.is_empty() || opts.changed {
+        return Err(anyhow::anyhow!(
+            "unsupported_mcp_scope: code_search_list/tree support include/exclude/limit, but not lang or changed scope"
+        ));
+    }
+    Ok(())
+}
+
 /// Parse [`QueryOptions`] from the tool arguments JSON object.
-fn parse_query_options(args: Option<&Value>) -> QueryOptions {
+fn parse_query_options(args: Option<&Value>) -> Result<QueryOptions> {
     let obj = match args.and_then(|v| v.as_object()) {
         Some(o) => o,
-        None => return QueryOptions::default(),
+        None => return Ok(QueryOptions::default()),
     };
 
-    QueryOptions {
+    Ok(QueryOptions {
         include: extract_string_array(obj, "include"),
         exclude: extract_string_array(obj, "exclude"),
         lang: extract_string_array(obj, "lang"),
@@ -519,17 +610,9 @@ fn parse_query_options(args: Option<&Value>) -> QueryOptions {
             .or_else(|| obj.get("allow_broad"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        limit: obj
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize)
-            .unwrap_or(100),
-        context: obj
-            .get("context")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u16)
-            .unwrap_or(0),
-    }
+        limit: optional_usize_arg(obj, "limit", 100)?,
+        context: optional_u16_arg(obj, "context", 0)?,
+    })
 }
 
 fn extract_string_array(obj: &serde_json::Map<String, Value>, field: &str) -> Vec<String> {
@@ -543,6 +626,45 @@ fn extract_string_array(obj: &serde_json::Map<String, Value>, field: &str) -> Ve
         .unwrap_or_default()
 }
 
+fn optional_usize_arg(
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+    default: usize,
+) -> Result<usize> {
+    let Some(value) = obj.get(field) else {
+        return Ok(default);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(anyhow::anyhow!(
+            "invalid_mcp_argument: {field} must be a non-negative integer"
+        ));
+    };
+    usize::try_from(number).map_err(|_| {
+        anyhow::anyhow!("invalid_mcp_argument: {field} must fit in the platform usize")
+    })
+}
+
+fn optional_u16_arg(
+    obj: &serde_json::Map<String, Value>,
+    field: &str,
+    default: u16,
+) -> Result<u16> {
+    let Some(value) = obj.get(field) else {
+        return Ok(default);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(anyhow::anyhow!(
+            "invalid_mcp_argument: {field} must be an integer between 0 and 65535"
+        ));
+    };
+    if number > u16::MAX as u64 {
+        return Err(anyhow::anyhow!(
+            "invalid_mcp_argument: {field} must be an integer between 0 and 65535"
+        ));
+    }
+    Ok(number as u16)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -552,6 +674,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn call_tool(server: &Server, name: &str, arguments: Value) -> ToolCallResult {
+        server.execute_tool(name, Some(&arguments)).unwrap()
+    }
+
+    fn call_tool_json(server: &Server, name: &str, arguments: Value) -> Value {
+        let result = call_tool(server, name, arguments);
+        assert!(!result.is_error, "tool returned error: {result:?}");
+        serde_json::from_str(&result.content[0].text).unwrap()
+    }
 
     // ------------------------------------------------------------------
     //  Protocol-level tests  (unit)
@@ -605,9 +737,11 @@ mod tests {
                 let names: Vec<&str> = list.tools.iter().map(|t| t.name.as_str()).collect();
                 assert!(names.contains(&"code_search_find"));
                 assert!(names.contains(&"code_search_defs"));
+                assert!(names.contains(&"code_search_list"));
+                assert!(names.contains(&"code_search_tree"));
                 assert!(names.contains(&"code_search_status"));
-                // All 12 tools should be present
-                assert_eq!(list.tools.len(), 12);
+                // All core CLI-backed tools should be present.
+                assert_eq!(list.tools.len(), 14);
             }
             _ => panic!("expected success response"),
         }
@@ -710,7 +844,9 @@ mod tests {
             Envelope::SuccessResponse(sr) => {
                 let result: ToolCallResult = serde_json::from_value(sr.result).unwrap();
                 assert!(result.is_error);
-                assert!(result.content[0].text.contains("Unknown tool"));
+                let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
+                assert_eq!(parsed["ok"], false);
+                assert_eq!(parsed["error"]["code"], "unknown_tool");
             }
             _ => panic!("expected success for unknown tool"),
         }
@@ -763,6 +899,9 @@ mod tests {
                 let parsed: Value = serde_json::from_str(text).unwrap();
                 assert_eq!(parsed["ok"], true);
                 assert_eq!(parsed["reliability"]["level"], "source_fact");
+                assert!(parsed["summary"]["changed"]["changedCount"]
+                    .as_u64()
+                    .is_some());
             }
             _ => panic!("expected success response"),
         }
@@ -799,6 +938,190 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tools_call_list_and_tree_reuse_cli_envelope_contract() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::write(dir.path().join("src/nested/lib.rs"), "fn helper() {}\n").unwrap();
+        fs::write(dir.path().join("src/nested/readme.txt"), "notes\n").unwrap();
+        let server = Server::new(dir.path()).unwrap();
+
+        let list = call_tool_json(
+            &server,
+            "code_search_list",
+            json!({ "dir": "src", "recursive": false }),
+        );
+        assert_eq!(list["ok"], true);
+        assert_eq!(list["command"], "list");
+        assert_eq!(list["canonicalCommand"], "list");
+        assert!(list["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src/nested" && entry["kind"] == "directory"));
+
+        let tree = call_tool_json(
+            &server,
+            "code_search_tree",
+            json!({ "dir": "src", "depth": 2 }),
+        );
+        assert_eq!(tree["ok"], true);
+        assert_eq!(tree["command"], "tree");
+        assert_eq!(tree["canonicalCommand"], "tree");
+        assert!(tree["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src/nested/lib.rs"));
+    }
+
+    #[test]
+    fn tools_call_list_and_tree_reject_unsupported_scope_and_bad_depth() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn helper() {}\n").unwrap();
+        fs::write(dir.path().join("src/readme.txt"), "notes\n").unwrap();
+        let server = Server::new(dir.path()).unwrap();
+
+        let lang_result = call_tool(
+            &server,
+            "code_search_list",
+            json!({ "dir": "src", "lang": ["rust"] }),
+        );
+        assert!(lang_result.is_error);
+        let lang_error: Value = serde_json::from_str(&lang_result.content[0].text).unwrap();
+        assert_eq!(lang_error["ok"], false);
+        assert_eq!(lang_error["error"]["code"], "unsupported_mcp_scope");
+
+        let changed_result = call_tool(
+            &server,
+            "code_search_tree",
+            json!({ "dir": "src", "changed": true }),
+        );
+        assert!(changed_result.is_error);
+        let changed_error: Value = serde_json::from_str(&changed_result.content[0].text).unwrap();
+        assert_eq!(changed_error["error"]["code"], "unsupported_mcp_scope");
+
+        let depth_result = call_tool(
+            &server,
+            "code_search_tree",
+            json!({ "dir": "src", "depth": 256 }),
+        );
+        assert!(depth_result.is_error);
+        let depth_error: Value = serde_json::from_str(&depth_result.content[0].text).unwrap();
+        assert_eq!(depth_error["ok"], false);
+        assert_eq!(depth_error["error"]["code"], "invalid_mcp_argument");
+
+        for invalid_depth in [json!(-1), json!(1.5)] {
+            let invalid_result = call_tool(
+                &server,
+                "code_search_tree",
+                json!({ "dir": "src", "depth": invalid_depth }),
+            );
+            assert!(invalid_result.is_error);
+            let invalid_error: Value =
+                serde_json::from_str(&invalid_result.content[0].text).unwrap();
+            assert_eq!(invalid_error["error"]["code"], "invalid_mcp_argument");
+        }
+    }
+
+    #[test]
+    fn tools_call_invalid_regex_returns_tool_error_envelope() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "hello\n").unwrap();
+        let server = Server::new(dir.path()).unwrap();
+
+        let result = call_tool(&server, "code_search_grep", json!({ "pattern": "[" }));
+        assert!(result.is_error);
+        let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_ne!(parsed["error"]["code"], "no_match");
+        assert!(parsed["error"]["code"].as_str().is_some());
+    }
+
+    #[test]
+    fn tools_call_find_rejects_invalid_context_values() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+        let server = Server::new(dir.path()).unwrap();
+
+        for invalid_context in [json!(65536), json!(-1), json!(1.5)] {
+            let result = call_tool(
+                &server,
+                "code_search_find",
+                json!({ "text": "needle", "context": invalid_context }),
+            );
+            assert!(result.is_error);
+            let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            assert_eq!(parsed["ok"], false);
+            assert_eq!(parsed["error"]["code"], "invalid_mcp_argument");
+        }
+    }
+
+    #[test]
+    fn tools_call_find_to_read_flow_returns_verifiable_source_range() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/main.rs"),
+            "fn main() {\n    let needle = 42;\n}\n",
+        )
+        .unwrap();
+        let server = Server::new(dir.path()).unwrap();
+
+        let found = call_tool_json(
+            &server,
+            "code_search_find",
+            json!({ "text": "needle", "context": 1 }),
+        );
+        assert_eq!(found["ok"], true);
+        assert_eq!(found["results"][0]["path"], "src/main.rs");
+        assert!(found["nextActions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "read"));
+        let target = found["results"][0]["readCommandArgv"][4]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let read = call_tool_json(&server, "code_search_read", json!({ "target": target }));
+        assert_eq!(read["ok"], true);
+        assert!(read["results"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("needle"));
+    }
+
+    #[test]
+    fn tools_call_broad_query_uses_guarded_cli_contract() {
+        let dir = tempdir().unwrap();
+        for idx in 0..8 {
+            fs::write(
+                dir.path().join(format!("file{idx}.java")),
+                "public class Sample {}\n",
+            )
+            .unwrap();
+        }
+        let server = Server::new(dir.path()).unwrap();
+
+        let found = call_tool_json(&server, "code_search_find", json!({ "text": "public" }));
+        assert_eq!(found["guard"]["triggered"], true);
+        assert_eq!(found["guard"]["reason"], "broad_literal_pattern");
+        assert!(found["results"].as_array().unwrap().len() <= 5);
+        assert!(found["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "broad_query_guard_triggered"));
+        assert!(found["guard"]["nextActions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "allow_broad"));
+    }
+
     // ------------------------------------------------------------------
     //  CLI integration test  (E2E via process)
     // ------------------------------------------------------------------
@@ -823,7 +1146,7 @@ mod tests {
             "limit": 50,
             "context": 3
         });
-        let opts = parse_query_options(Some(&args));
+        let opts = parse_query_options(Some(&args)).unwrap();
         assert_eq!(opts.include, vec!["src", "lib"]);
         assert_eq!(opts.exclude, vec!["test"]);
         assert_eq!(opts.lang, vec!["rust"]);
@@ -837,9 +1160,23 @@ mod tests {
     #[test]
     fn parse_query_options_uses_defaults_when_missing() {
         let args = json!({});
-        let opts = parse_query_options(Some(&args));
+        let opts = parse_query_options(Some(&args)).unwrap();
         assert_eq!(opts.limit, 100);
         assert_eq!(opts.context, 0);
         assert!(opts.include.is_empty());
+    }
+
+    #[test]
+    fn parse_query_options_rejects_invalid_numeric_values() {
+        for args in [
+            json!({ "context": 65536 }),
+            json!({ "context": -1 }),
+            json!({ "context": 1.5 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": 1.5 }),
+        ] {
+            let error = parse_query_options(Some(&args)).unwrap_err();
+            assert!(error.to_string().starts_with("invalid_mcp_argument:"));
+        }
     }
 }
