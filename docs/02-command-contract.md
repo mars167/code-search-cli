@@ -78,6 +78,8 @@ flowchart TB
 - `reliability` 告诉 Agent 是否能把结果当作事实。
 - `index` 只描述缓存是否参与和是否新鲜。
 - `budget` 描述本次输出预算：`tier` 按仓库规模/命中量分为 `small`、`medium`、`large`，并暴露 `maxResults`、`maxPreviewChars`、`maxContextLines` 和 `reason`。宽查询 guard 仍是硬保护；budget 是常规输出压缩策略。
+- `noMatch` 只出现在搜索/导航类命令的空结果响应中，说明空结果原因、实际 scope、index 使用状态，并配套可执行 `nextActions`。空结果不代表符号或文本不存在。
+- `ambiguity` 只出现在同名符号候选过多的响应中，按语言、kind、路径等维度分组，并通过 `nextActions` 给出收窄命令。
 - `warnings` 必须暴露 fallback、stale、remote mismatch 或 heuristic 边界；每条 warning 使用 `{code,message}` 结构，`code` 稳定、可匹配。
 
 ## 可靠性流转

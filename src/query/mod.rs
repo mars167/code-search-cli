@@ -262,7 +262,13 @@ impl QueryService {
             &self.workspace.snapshot_id,
             output::parser_fact(),
             results,
-            warnings,
+            merge_warnings(
+                warnings,
+                vec![
+                    "precise_scip_index_unavailable: using tree-sitter parser fallback"
+                        .to_string(),
+                ],
+            ),
         )))
     }
 
@@ -363,7 +369,12 @@ impl QueryService {
             &self.workspace.snapshot_id,
             output::parser_fact(),
             page.results.clone(),
-            warnings,
+            merge_warnings(
+                warnings,
+                vec![
+                    "precise_scip_index_unavailable: using tree-sitter parser fallback".to_string(),
+                ],
+            ),
         );
         Ok(self.finalize(output::with_page_meta(
             response,
@@ -495,6 +506,11 @@ fn page_response(value: Value, page: search::QueryOutput) -> Value {
         ),
         page.budget,
     )
+}
+
+fn merge_warnings(mut first: Vec<String>, second: Vec<String>) -> Vec<String> {
+    first.extend(second);
+    first
 }
 
 // ---------------------------------------------------------------------------

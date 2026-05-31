@@ -189,6 +189,66 @@ fn refs_text_fallback_uses_identifier_boundaries() {
 }
 
 #[test]
+fn find_no_match_returns_structured_next_actions() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "MissingThing"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["results"].as_array().unwrap().len(), 0);
+    assert_eq!(json["noMatch"]["reason"], "no_results");
+    assert_eq!(json["noMatch"]["query"]["pattern"], "MissingThing");
+    assert!(json["noMatch"]["index"]["fallback"].as_bool().is_some());
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "no_match"));
+    assert!(json["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "try_regex"
+            && action["command"]
+                .as_str()
+                .unwrap()
+                .contains("grep MissingThing")
+            && action["command"].as_str().unwrap().contains("--path")));
+}
+
+#[test]
+fn invalid_regex_is_not_reported_as_no_match() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["grep", "["])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert!(json.get("noMatch").is_none());
+    assert_ne!(json["error"]["code"], "no_match");
+}
+
+#[test]
 fn files_is_path_substring_while_glob_is_strict_glob() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -2246,6 +2306,52 @@ fn defs_falls_back_to_parser_for_java_classes() {
         defs_json["results"][0]["path"],
         "src/main/java/example/SampleService.java"
     );
+    assert!(defs_json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "precise_scip_index_unavailable"));
+}
+
+#[test]
+fn defs_ambiguous_symbol_results_include_grouped_hints() {
+    let dir = tempdir().unwrap();
+    for module in ["api", "db", "web"] {
+        let path = dir.path().join(format!("src/main/java/{module}"));
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("User.java"),
+            format!("package {module};\n\npublic class User {{}}\n"),
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["defs", "User"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["ambiguity"]["triggered"], true);
+    assert_eq!(json["ambiguity"]["reason"], "multiple_symbol_candidates");
+    assert_eq!(json["ambiguity"]["candidateCount"], 3);
+    assert!(json["ambiguity"]["groups"]["kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|group| group["value"] == "class" && group["count"] == 3));
+    assert!(json["nextActions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|action| action["kind"] == "narrow_scope"
+            && action["command"].as_str().unwrap().contains("--include")
+            && action["command"].as_str().unwrap().contains("--path")));
 }
 
 #[test]

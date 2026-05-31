@@ -272,7 +272,16 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     &workspace.snapshot_id,
                     output::parser_fact(),
                     page.results.clone(),
-                    merge_warnings(warnings, scope_warnings.clone()),
+                    merge_warnings(
+                        warnings,
+                        merge_warnings(
+                            vec![
+                                "precise_scip_index_unavailable: using tree-sitter parser fallback"
+                                    .to_string(),
+                            ],
+                            scope_warnings.clone(),
+                        ),
+                    ),
                 ),
                 page.truncated,
                 page.next_cursor,
@@ -311,7 +320,16 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 &workspace.snapshot_id,
                 output::parser_fact(),
                 results,
-                merge_warnings(warnings, scope_warnings.clone()),
+                merge_warnings(
+                    warnings,
+                    merge_warnings(
+                        vec![
+                            "precise_scip_index_unavailable: using tree-sitter parser fallback"
+                                .to_string(),
+                        ],
+                        scope_warnings.clone(),
+                    ),
+                ),
             )
         }
         Command::Calls { identifier } => {
