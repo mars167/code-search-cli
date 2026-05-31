@@ -31,6 +31,10 @@ pub struct QueryOptions {
     pub lang: Vec<String>,
     /// Restrict to git changed files.
     pub changed: bool,
+    /// Include hidden files/directories.
+    pub hidden: bool,
+    /// Ignore ignore files.
+    pub no_ignore: bool,
     /// Pagination cursor.
     pub cursor: Option<String>,
     /// Allow broad queries to return full paginated results.
@@ -48,6 +52,8 @@ impl Default for QueryOptions {
             exclude: vec![],
             lang: vec![],
             changed: false,
+            hidden: false,
+            no_ignore: false,
             cursor: None,
             allow_broad: false,
             limit: 100,
@@ -65,8 +71,8 @@ impl QueryOptions {
             changed: self.changed,
             cursor: self.cursor.clone(),
             allow_broad: self.allow_broad,
-            hidden: false,
-            no_ignore: false,
+            hidden: self.hidden,
+            no_ignore: self.no_ignore,
             limit: self.limit,
         }
     }
@@ -103,39 +109,30 @@ impl QueryService {
 
     /// Full-text / literal search (delegates to `search::find`).
     pub fn find(&self, text: &str, opts: &QueryOptions) -> Result<Value> {
-        let scan = opts.to_scan_options();
-        let qo = search::find(&self.workspace, &scan, text, "literal", opts.context, false)?;
-        let response = output::response_with_index(
-            "find",
-            "find",
-            scoped_query(json!({ "pattern": text, "mode": "literal" }), &scan),
-            &self.workspace.snapshot_id,
-            output::source_fact(),
-            qo.index.clone(),
-            qo.results.clone(),
-            Vec::new(),
-        );
-        Ok(self.finalize(page_response(response, qo)))
+        self.text_search("find", text, "literal", opts.context, opts)
     }
 
     /// Regex search (delegates to `search::find` with mode=regex).
     pub fn grep(&self, pattern: &str, opts: &QueryOptions) -> Result<Value> {
+        self.text_search("grep", pattern, "regex", opts.context, opts)
+    }
+
+    /// Full-text search with explicit command/mode metadata.
+    pub fn text_search(
+        &self,
+        command: &str,
+        pattern: &str,
+        mode: &str,
+        context: u16,
+        opts: &QueryOptions,
+    ) -> Result<Value> {
         let scan = opts.to_scan_options();
-        let qo = search::find(
-            &self.workspace,
-            &scan,
-            pattern,
-            "regex",
-            opts.context,
-            false,
-        )?;
+        let qo = search::find(&self.workspace, &scan, pattern, mode, context, false)?;
+        let query = json!({ "pattern": pattern, "mode": mode, "context": context });
         let response = output::response_with_index(
-            "grep",
+            command,
             "find",
-            scoped_query(
-                json!({ "pattern": pattern, "mode": "regex", "context": opts.context }),
-                &scan,
-            ),
+            scoped_query(query, &scan),
             &self.workspace.snapshot_id,
             output::source_fact(),
             qo.index.clone(),
@@ -263,7 +260,10 @@ impl QueryService {
             return Ok(self.finalize(output::response_with_index(
                 "defs",
                 "defs",
-                json!({ "identifier": identifier, "producer": "scip" }),
+                scoped_query(
+                    json!({ "identifier": identifier, "producer": "scip" }),
+                    &scan,
+                ),
                 &self.workspace.snapshot_id,
                 output::precise_fact(),
                 precise.index,
@@ -277,7 +277,10 @@ impl QueryService {
         Ok(self.finalize(output::response(
             "defs",
             "defs",
-            json!({ "identifier": identifier, "producer": "tree_sitter_parser_fallback", "fallbackReason": "precise_scip_index_unavailable" }),
+            scoped_query(
+                json!({ "identifier": identifier, "producer": "tree_sitter_parser_fallback", "fallbackReason": "precise_scip_index_unavailable" }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::parser_fact(),
             results,
@@ -427,7 +430,10 @@ impl QueryService {
                 return Ok(self.finalize(output::response_with_index(
                     "calls",
                     "calls",
-                    json!({ "identifier": identifier, "producer": "graph" }),
+                    scoped_query(
+                        json!({ "identifier": identifier, "producer": "graph" }),
+                        &scan,
+                    ),
                     &self.workspace.snapshot_id,
                     output::inferred_candidate(),
                     index_meta,
@@ -442,7 +448,10 @@ impl QueryService {
         Ok(self.finalize(output::response(
             "calls",
             "calls",
-            json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+            scoped_query(
+                json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::inferred_candidate(),
             results,
@@ -463,7 +472,10 @@ impl QueryService {
                 return Ok(self.finalize(output::response_with_index(
                     "callers",
                     "callers",
-                    json!({ "identifier": identifier, "producer": "graph" }),
+                    scoped_query(
+                        json!({ "identifier": identifier, "producer": "graph" }),
+                        &scan,
+                    ),
                     &self.workspace.snapshot_id,
                     output::inferred_candidate(),
                     index_meta,
@@ -478,7 +490,10 @@ impl QueryService {
         Ok(self.finalize(output::response(
             "callers",
             "callers",
-            json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+            scoped_query(
+                json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                &scan,
+            ),
             &self.workspace.snapshot_id,
             output::inferred_candidate(),
             results,

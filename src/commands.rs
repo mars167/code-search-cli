@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::{
-    cli::{Cli, Command, HooksCommand, IndexCommand},
-    completions, graph, index, output, scip_index, search, syntax,
+    cli::{Cli, Command, HooksCommand, IndexCommand, QueryCommand},
+    completions, graph, index, output, saved_query, scip_index, search, syntax,
     workspace::{ScanOptions, Workspace},
     AppResult,
 };
@@ -38,7 +38,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 output::response_with_index(
                     "find",
                     "find",
-                    scoped_query(json!({ "pattern": text, "mode": mode }), &scan_opts),
+                    scoped_query(
+                        json!({ "pattern": text, "mode": mode, "context": cli.context }),
+                        &scan_opts,
+                    ),
                     &workspace.snapshot_id,
                     output::source_fact(),
                     query_output.index.clone(),
@@ -197,7 +200,8 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         precise.results,
                         scope_warnings.clone(),
                     ),
-                    &workspace.root,
+                    &workspace,
+                    cli.save_query.as_deref(),
                 );
             }
             let mut query_output = search::find(
@@ -256,7 +260,8 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         page.next_cursor,
                         page.facets,
                     ),
-                    &workspace.root,
+                    &workspace,
+                    cli.save_query.as_deref(),
                 );
             }
             let (results, warnings) = syntax::symbols(&workspace, &scan_opts, query)?;
@@ -312,7 +317,8 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         precise.results,
                         scope_warnings.clone(),
                     ),
-                    &workspace.root,
+                    &workspace,
+                    cli.save_query.as_deref(),
                 );
             }
             let (results, warnings) = syntax::defs(&workspace, &scan_opts, identifier)?;
@@ -352,14 +358,18 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         output::response_with_index(
                             "calls",
                             "calls",
-                            json!({ "identifier": identifier, "producer": "graph" }),
+                            scoped_query(
+                                json!({ "identifier": identifier, "producer": "graph" }),
+                                &scan_opts,
+                            ),
                             &workspace.snapshot_id,
                             output::inferred_candidate(),
                             index_meta,
                             json!(results),
                             warnings,
                         ),
-                        &workspace.root,
+                        &workspace,
+                        cli.save_query.as_deref(),
                     );
                 }
             }
@@ -369,7 +379,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             output::response(
                 "calls",
                 "calls",
-                json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                scoped_query(
+                    json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                    &scan_opts,
+                ),
                 &workspace.snapshot_id,
                 output::inferred_candidate(),
                 results,
@@ -389,14 +402,18 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         output::response_with_index(
                             "callers",
                             "callers",
-                            json!({ "identifier": identifier, "producer": "graph" }),
+                            scoped_query(
+                                json!({ "identifier": identifier, "producer": "graph" }),
+                                &scan_opts,
+                            ),
                             &workspace.snapshot_id,
                             output::inferred_candidate(),
                             index_meta,
                             json!(results),
                             warnings,
                         ),
-                        &workspace.root,
+                        &workspace,
+                        cli.save_query.as_deref(),
                     );
                 }
             }
@@ -406,7 +423,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             output::response(
                 "callers",
                 "callers",
-                json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                scoped_query(
+                    json!({ "identifier": identifier, "producer": "tree_sitter_call_heuristic" }),
+                    &scan_opts,
+                ),
                 &workspace.snapshot_id,
                 output::inferred_candidate(),
                 results,
@@ -489,6 +509,40 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 vec!["HTTP/MCP adapters are expected to wrap the same CLI query service after JSON schema stabilization".to_string()],
             )
         }
+        Command::Query { command } => match command {
+            QueryCommand::Replay { name, snapshot } => {
+                let value = saved_query::replay(&workspace, name, snapshot)?;
+                exit_code = output::no_match_exit(&value["results"]);
+                value
+            }
+            QueryCommand::Show { name } => output::response(
+                "query show",
+                "query",
+                json!({ "name": name }),
+                &workspace.snapshot_id,
+                output::source_fact(),
+                json!([saved_query::show(&workspace, name)?]),
+                Vec::new(),
+            ),
+            QueryCommand::List => output::response(
+                "query list",
+                "query",
+                json!({}),
+                &workspace.snapshot_id,
+                output::source_fact(),
+                saved_query::list(&workspace)?,
+                Vec::new(),
+            ),
+            QueryCommand::Delete { name } => output::response(
+                "query delete",
+                "query",
+                json!({ "name": name }),
+                &workspace.snapshot_id,
+                output::source_fact(),
+                saved_query::delete(&workspace, name)?,
+                Vec::new(),
+            ),
+        },
         Command::Index { command } => match command {
             IndexCommand::Build {
                 staged,
@@ -630,7 +684,8 @@ pub fn run(cli: Cli) -> AppResult<i32> {
         Command::Completions { .. } => unreachable!("handled before workspace discovery"),
     };
 
-    let value = output::with_workspace_root(value, &workspace.root);
+    let mut value = output::with_workspace_root(value, &workspace.root);
+    attach_saved_query(&mut value, &workspace, cli.save_query.as_deref())?;
     output::emit(&cli.output, &value)?;
     Ok(exit_code)
 }
@@ -638,12 +693,25 @@ pub fn run(cli: Cli) -> AppResult<i32> {
 fn emit_response(
     format: &crate::cli::OutputFormat,
     value: serde_json::Value,
-    workspace_root: &std::path::Path,
+    workspace: &Workspace,
+    save_query: Option<&str>,
 ) -> AppResult<i32> {
-    let value = output::with_workspace_root(value, workspace_root);
+    let mut value = output::with_workspace_root(value, &workspace.root);
+    attach_saved_query(&mut value, workspace, save_query)?;
     let exit_code = output::no_match_exit(&value["results"]);
     output::emit(format, &value)?;
     Ok(exit_code)
+}
+
+fn attach_saved_query(
+    value: &mut Value,
+    workspace: &Workspace,
+    save_query: Option<&str>,
+) -> AppResult<()> {
+    if let Some(name) = save_query {
+        value["savedQuery"] = saved_query::save_from_response(workspace, name, value)?;
+    }
+    Ok(())
 }
 
 fn page_response(value: Value, page: search::QueryOutput) -> Value {

@@ -21,6 +21,7 @@ const COMMANDS: &[&str] = &[
     "status",
     "watch",
     "serve",
+    "query",
     "index",
     "hooks",
     "completions",
@@ -39,16 +40,21 @@ fn bash() -> String {
     format!(
         r#"_code_search()
 {{
-  local cur prev commands index_cmds hooks_cmds shells
+  local cur prev commands query_cmds index_cmds hooks_cmds shells
   COMPREPLY=()
   cur="${{COMP_WORDS[COMP_CWORD]}}"
   prev="${{COMP_WORDS[COMP_CWORD-1]}}"
   commands="{commands}"
+  query_cmds="replay show list delete"
   index_cmds="build update status verify clean import-scip"
   hooks_cmds="install uninstall status"
   shells="bash zsh fish"
 
   case "$prev" in
+    query)
+      COMPREPLY=( $(compgen -W "$query_cmds" -- "$cur") )
+      return 0
+      ;;
     index)
       COMPREPLY=( $(compgen -W "$index_cmds" -- "$cur") )
       return 0
@@ -64,7 +70,7 @@ fn bash() -> String {
   esac
 
   if [[ "$cur" == -* ]]; then
-    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --help --version" -- "$cur") )
+    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --save-query --help --version" -- "$cur") )
   else
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   fi
@@ -80,12 +86,13 @@ fn zsh() -> String {
         r#"#compdef code-search
 
 _code_search() {{
-  local -a commands index_cmds hooks_cmds shells global_opts
+  local -a commands query_cmds index_cmds hooks_cmds shells global_opts
   commands=({commands})
+  query_cmds=(replay show list delete)
   index_cmds=(build update status verify clean import-scip)
   hooks_cmds=(install uninstall status)
   shells=(bash zsh fish)
-  global_opts=(--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --help --version)
+  global_opts=(--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --save-query --help --version)
 
   if [[ "$words[CURRENT]" == -* ]]; then
     _describe 'option' global_opts
@@ -98,6 +105,9 @@ _code_search() {{
   fi
 
   case $words[2] in
+    query)
+      _describe 'query command' query_cmds
+      ;;
     index)
       _describe 'index command' index_cmds
       ;;
@@ -133,10 +143,12 @@ fn fish() -> String {
         "complete -c code-search -l allow-broad".to_string(),
         "complete -c code-search -l limit -r".to_string(),
         "complete -c code-search -l context -r".to_string(),
+        "complete -c code-search -l save-query -r".to_string(),
     ];
     for command in COMMANDS {
         lines.push(format!("complete -c code-search -f -a {command}"));
     }
+    lines.push("complete -c code-search -n '__fish_seen_subcommand_from query' -a 'replay show list delete'".to_string());
     lines.push("complete -c code-search -n '__fish_seen_subcommand_from index' -a 'build update status verify clean import-scip'".to_string());
     lines.push("complete -c code-search -n '__fish_seen_subcommand_from hooks' -a 'install uninstall status'".to_string());
     lines.push(

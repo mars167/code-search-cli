@@ -5,6 +5,7 @@ pub mod index;
 pub mod lancedb_store;
 pub mod output;
 pub mod remote;
+pub mod saved_query;
 pub mod scip;
 pub mod scip_index;
 pub mod scip_proto;

@@ -601,6 +601,12 @@ fn parse_query_options(args: Option<&Value>) -> Result<QueryOptions> {
             .get("changed")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        hidden: obj.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false),
+        no_ignore: obj
+            .get("noIgnore")
+            .or_else(|| obj.get("no_ignore"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         cursor: obj
             .get("cursor")
             .and_then(|v| v.as_str())

@@ -41,6 +41,9 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = 0)]
     pub context: u16,
 
+    #[arg(long, global = true)]
+    pub save_query: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -119,6 +122,10 @@ pub enum Command {
         #[arg(long)]
         no_watch: bool,
     },
+    Query {
+        #[command(subcommand)]
+        command: QueryCommand,
+    },
     Index {
         #[command(subcommand)]
         command: IndexCommand,
@@ -131,6 +138,28 @@ pub enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QueryCommand {
+    Replay {
+        name: String,
+        #[arg(long, value_enum, default_value_t = ReplaySnapshot::Current)]
+        snapshot: ReplaySnapshot,
+    },
+    Show {
+        name: String,
+    },
+    List,
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ReplaySnapshot {
+    Current,
+    Saved,
 }
 
 #[derive(Debug, Subcommand)]
