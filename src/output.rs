@@ -166,6 +166,11 @@ pub fn with_guard(mut value: Value, guard: Option<Value>) -> Value {
     value
 }
 
+pub fn with_budget(mut value: Value, budget: Value) -> Value {
+    value["budget"] = budget;
+    value
+}
+
 pub fn with_summary_field(mut value: Value, field: &str, field_value: Value) -> Value {
     if let Some(summary) = value.get_mut("summary").and_then(Value::as_object_mut) {
         summary.insert(field.to_string(), field_value);
@@ -275,6 +280,7 @@ fn render_jsonl(value: &Value, out: &mut dyn Write) -> io::Result<()> {
         "truncated": value.get("truncated").cloned().unwrap_or_else(|| json!(false)),
         "nextCursor": value.get("nextCursor").cloned().unwrap_or(Value::Null),
         "resultCount": result_count,
+        "budget": value.get("budget").cloned().unwrap_or(Value::Null),
         "warnings": value.get("warnings").cloned().unwrap_or_else(|| json!([])),
         "suggestedReads": value.get("suggestedReads").cloned().unwrap_or_else(|| json!([])),
         "nextActions": value.get("nextActions").cloned().unwrap_or_else(|| json!([]))
@@ -441,9 +447,9 @@ fn is_readable_path_result(object: &serde_json::Map<String, Value>) -> bool {
     {
         return false;
     }
-    if object.get("binary").and_then(Value::as_bool) == Some(true)
-        || object.get("truncated").and_then(Value::as_bool) == Some(true)
-    {
+    let full_content_truncated = object.contains_key("content")
+        && object.get("truncated").and_then(Value::as_bool) == Some(true);
+    if object.get("binary").and_then(Value::as_bool) == Some(true) || full_content_truncated {
         return false;
     }
     object.get("kind").and_then(Value::as_str) != Some("directory")

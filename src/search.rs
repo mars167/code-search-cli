@@ -22,6 +22,14 @@ use crate::{
 const MAX_FULL_READ_BYTES: usize = 64 * 1024;
 const MAX_PREVIEW_CHARS: usize = 240;
 const BROAD_SAMPLE_LIMIT: usize = 5;
+const SMALL_WORKSPACE_FILE_LIMIT: usize = 20;
+const MEDIUM_WORKSPACE_FILE_LIMIT: usize = 200;
+const SMALL_WORKSPACE_BYTES: u64 = 512 * 1024;
+const MEDIUM_WORKSPACE_BYTES: u64 = 5 * 1024 * 1024;
+const MEDIUM_HIT_LIMIT: usize = 50;
+const LARGE_HIT_LIMIT: usize = 100;
+const MEDIUM_PREVIEW_CHARS: usize = 160;
+const LARGE_PREVIEW_CHARS: usize = 96;
 
 pub struct QueryOutput {
     pub results: Value,
@@ -30,6 +38,7 @@ pub struct QueryOutput {
     pub next_cursor: Option<String>,
     pub facets: Value,
     pub guard: Option<Value>,
+    pub budget: Value,
 }
 
 pub struct Page {
@@ -44,6 +53,18 @@ pub struct Page {
 struct BroadGuard {
     reason: &'static str,
     suggestion: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct OutputBudget {
+    tier: &'static str,
+    max_results: usize,
+    max_preview_chars: usize,
+    max_context_lines: u16,
+    reason: &'static str,
+    repository_files: usize,
+    repository_bytes: u64,
+    estimated_matches: usize,
 }
 
 pub fn files(
@@ -65,6 +86,8 @@ pub fn files(
         .unwrap_or(false);
 
     let source = candidate_file_catalog(workspace, opts)?;
+    let repository_files = source.records.len();
+    let repository_bytes = source.records.iter().map(|file| file.size).sum();
     for file in source.records {
         let matches = broad_path
             || matcher
@@ -83,11 +106,19 @@ pub fn files(
             }));
         }
     }
+    let budget = output_budget(
+        repository_files,
+        repository_bytes,
+        results.len(),
+        opts.limit,
+        0,
+    );
     paged_query_output(
         results,
         source.index,
         opts,
         guard,
+        budget,
         &pagination_scope(
             if strict_glob { "glob" } else { "files" },
             json!({ "pattern": pattern, "strictGlob": strict_glob }),
@@ -235,6 +266,10 @@ pub fn find(
     };
 
     let source = candidate_text_files(workspace, opts, pattern, mode)?;
+    let repository_files = source.records.len();
+    let repository_bytes = source.records.iter().map(|file| file.size).sum();
+    let provisional_budget =
+        output_budget(repository_files, repository_bytes, 0, opts.limit, context);
     let mut results = Vec::new();
     for file in source.records {
         let path = workspace.abs_path(&file.path);
@@ -247,14 +282,16 @@ pub fn find(
                 continue;
             }
             let range = byte_range_to_line_range(&content, mat.start(), mat.end());
-            let (preview, preview_truncated) = preview_line(&content, mat.start());
+            let (preview, preview_truncated) =
+                preview_line(&content, mat.start(), provisional_budget.max_preview_chars);
             results.push(json!({
                 "path": file.path,
                 "range": range,
                 "matchText": mat.as_str(),
                 "preview": preview,
                 "previewTruncated": preview_truncated,
-                "context": context_lines(&content, range["start"]["line"].as_u64().unwrap_or(1) as usize, context),
+                "previewTruncatedReason": if preview_truncated { Value::String("output_budget_preview".to_string()) } else { Value::Null },
+                "context": context_lines(&content, range["start"]["line"].as_u64().unwrap_or(1) as usize, context, provisional_budget.max_preview_chars),
                 "fileHash": file.hash,
                 "language": file.language,
                 "producer": text_search_producer(refs_mode, source.index["used"].as_bool().unwrap_or(false)),
@@ -263,11 +300,20 @@ pub fn find(
             }));
         }
     }
+    let budget = output_budget(
+        repository_files,
+        repository_bytes,
+        results.len(),
+        opts.limit,
+        context,
+    );
+    apply_output_budget(&mut results, &budget);
     paged_query_output(
         results,
         source.index,
         opts,
         broad_guard(if refs_mode { "refs" } else { "find" }, pattern, Some(mode)),
+        budget,
         &pagination_scope(
             if refs_mode { "refs" } else { "find" },
             json!({ "pattern": pattern, "mode": mode, "context": context }),
@@ -441,6 +487,7 @@ fn paged_query_output(
     index: Value,
     opts: &ScanOptions,
     guard: Option<BroadGuard>,
+    budget: OutputBudget,
     scope: &str,
 ) -> Result<QueryOutput> {
     let page = page_results_vec(results, opts, guard, scope)?;
@@ -451,6 +498,7 @@ fn paged_query_output(
         next_cursor: page.next_cursor,
         facets: page.facets,
         guard: page.guard,
+        budget: budget.to_value(),
     })
 }
 
@@ -552,6 +600,171 @@ fn guarded_page(results: Vec<Value>, facets: Value, guard: BroadGuard) -> Page {
         next_cursor: None,
         facets: guard_value["facets"].clone(),
         guard: Some(guard_value),
+    }
+}
+
+impl OutputBudget {
+    fn to_value(&self) -> Value {
+        json!({
+            "tier": self.tier,
+            "maxResults": self.max_results,
+            "maxPreviewChars": self.max_preview_chars,
+            "maxContextLines": self.max_context_lines,
+            "reason": self.reason,
+            "repository": {
+                "files": self.repository_files,
+                "bytes": self.repository_bytes
+            },
+            "estimatedMatches": self.estimated_matches
+        })
+    }
+}
+
+fn output_budget(
+    repository_files: usize,
+    repository_bytes: u64,
+    estimated_matches: usize,
+    requested_limit: usize,
+    requested_context: u16,
+) -> OutputBudget {
+    let large = repository_files > MEDIUM_WORKSPACE_FILE_LIMIT
+        || repository_bytes > MEDIUM_WORKSPACE_BYTES
+        || estimated_matches > LARGE_HIT_LIMIT;
+    let medium = repository_files > SMALL_WORKSPACE_FILE_LIMIT
+        || repository_bytes > SMALL_WORKSPACE_BYTES
+        || estimated_matches > MEDIUM_HIT_LIMIT;
+
+    if large {
+        return OutputBudget {
+            tier: "large",
+            max_results: requested_limit,
+            max_preview_chars: LARGE_PREVIEW_CHARS,
+            max_context_lines: requested_context,
+            reason: "large_workspace_or_high_hits",
+            repository_files,
+            repository_bytes,
+            estimated_matches,
+        };
+    }
+
+    if medium {
+        return OutputBudget {
+            tier: "medium",
+            max_results: requested_limit,
+            max_preview_chars: MEDIUM_PREVIEW_CHARS,
+            max_context_lines: requested_context,
+            reason: "medium_workspace_or_hit_count",
+            repository_files,
+            repository_bytes,
+            estimated_matches,
+        };
+    }
+
+    OutputBudget {
+        tier: "small",
+        max_results: requested_limit,
+        max_preview_chars: MAX_PREVIEW_CHARS,
+        max_context_lines: requested_context,
+        reason: "small_workspace_low_hits",
+        repository_files,
+        repository_bytes,
+        estimated_matches,
+    }
+}
+
+fn apply_output_budget(results: &mut [Value], budget: &OutputBudget) {
+    let max_context_result_lines = if budget.max_context_lines == 0 {
+        0
+    } else {
+        usize::from(budget.max_context_lines) * 2 + 1
+    };
+    for result in results {
+        apply_preview_budget(result, budget.max_preview_chars);
+        apply_context_budget(result, max_context_result_lines, budget.max_preview_chars);
+    }
+}
+
+fn apply_preview_budget(result: &mut Value, max_chars: usize) {
+    let Some(preview) = result.get("preview").and_then(Value::as_str) else {
+        return;
+    };
+    let (truncated, changed) = truncate_preview(preview, max_chars);
+    let existing_truncated = result
+        .get("previewTruncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if changed {
+        result["preview"] = Value::String(truncated);
+        result["previewTruncated"] = Value::Bool(true);
+        result["previewTruncatedReason"] = Value::String("output_budget_preview".to_string());
+        mark_result_truncated(result, "output_budget_preview");
+    } else if existing_truncated && result.get("previewTruncatedReason").is_none() {
+        result["previewTruncatedReason"] = Value::String("output_budget_preview".to_string());
+        mark_result_truncated(result, "output_budget_preview");
+    }
+}
+
+fn apply_context_budget(result: &mut Value, max_lines: usize, max_chars: usize) {
+    let match_line = result
+        .pointer("/range/start/line")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let mut context_truncated = false;
+    let mut text_truncated = false;
+    let Some(context) = result.get_mut("context").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let original_len = context.len();
+    if max_lines == 0 {
+        if original_len > 0 {
+            context.clear();
+            context_truncated = true;
+        }
+    } else if original_len > max_lines {
+        let mut selected = Vec::new();
+        if let Some(line) = context
+            .iter()
+            .find(|line| line.get("line").and_then(Value::as_u64) == Some(match_line))
+            .cloned()
+        {
+            selected.push(line);
+        }
+        for line in context.iter().cloned() {
+            if selected.len() >= max_lines {
+                break;
+            }
+            if line.get("line").and_then(Value::as_u64) != Some(match_line) {
+                selected.push(line);
+            }
+        }
+        *context = selected;
+        context_truncated = true;
+    }
+
+    for line in context {
+        if let Some(text) = line.get("text").and_then(Value::as_str) {
+            let (truncated, changed) = truncate_preview(text, max_chars);
+            if changed {
+                line["text"] = Value::String(truncated);
+                line["truncated"] = Value::Bool(true);
+                line["truncatedReason"] = Value::String("output_budget_preview".to_string());
+                text_truncated = true;
+            }
+        }
+    }
+
+    if context_truncated || text_truncated {
+        result["contextTruncated"] = Value::Bool(true);
+        result["contextTruncatedReason"] = Value::String("output_budget_context".to_string());
+        mark_result_truncated(result, "output_budget_context");
+    }
+}
+
+fn mark_result_truncated(result: &mut Value, reason: &str) {
+    result["truncated"] = Value::Bool(true);
+    if result.get("truncatedReason").is_none() || result["truncatedReason"].is_null() {
+        result["truncatedReason"] = Value::String(reason.to_string());
     }
 }
 
@@ -883,16 +1096,16 @@ fn text_search_producer(refs_mode: bool, index_used: bool) -> &'static str {
     }
 }
 
-fn preview_line(content: &str, byte: usize) -> (String, bool) {
+fn preview_line(content: &str, byte: usize, max_chars: usize) -> (String, bool) {
     let start = content[..byte].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
     let end = content[byte..]
         .find('\n')
         .map(|idx| byte + idx)
         .unwrap_or(content.len());
-    truncate_preview(content[start..end].trim_end())
+    truncate_preview(content[start..end].trim_end(), max_chars)
 }
 
-fn context_lines(content: &str, line: usize, context: u16) -> Value {
+fn context_lines(content: &str, line: usize, context: u16, max_chars: usize) -> Value {
     if context == 0 {
         return Value::Array(Vec::new());
     }
@@ -904,21 +1117,23 @@ fn context_lines(content: &str, line: usize, context: u16) -> Value {
         .iter()
         .enumerate()
         .map(|(idx, text)| {
+            let (text, truncated) = truncate_preview(text, max_chars);
             json!({
                 "line": start + idx + 1,
-                "text": truncate_preview(text).0,
-                "truncated": truncate_preview(text).1
+                "text": text,
+                "truncated": truncated,
+                "truncatedReason": if truncated { Value::String("output_budget_preview".to_string()) } else { Value::Null }
             })
         })
         .collect();
     Value::Array(values)
 }
 
-fn truncate_preview(text: &str) -> (String, bool) {
-    if text.chars().count() <= MAX_PREVIEW_CHARS {
+fn truncate_preview(text: &str, max_chars: usize) -> (String, bool) {
+    if text.chars().count() <= max_chars {
         return (text.to_string(), false);
     }
-    let truncated = text.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    let truncated = text.chars().take(max_chars).collect::<String>();
     (format!("{truncated}..."), true)
 }
 
