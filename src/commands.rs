@@ -16,6 +16,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
         lang: cli.lang.clone(),
         changed: cli.changed,
         cursor: cli.cursor.clone(),
+        allow_broad: cli.allow_broad,
         limit: cli.limit,
     };
     let mut exit_code = 0;
@@ -621,7 +622,10 @@ fn emit_response(
 }
 
 fn page_response(value: Value, page: search::QueryOutput) -> Value {
-    output::with_page_meta(value, page.truncated, page.next_cursor, page.facets)
+    output::with_guard(
+        output::with_page_meta(value, page.truncated, page.next_cursor, page.facets),
+        page.guard,
+    )
 }
 
 fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {

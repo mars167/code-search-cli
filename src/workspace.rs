@@ -20,6 +20,7 @@ pub struct ScanOptions {
     pub lang: Vec<String>,
     pub changed: bool,
     pub cursor: Option<String>,
+    pub allow_broad: bool,
     pub limit: usize,
 }
 

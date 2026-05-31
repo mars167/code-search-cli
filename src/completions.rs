@@ -64,7 +64,7 @@ fn bash() -> String {
   esac
 
   if [[ "$cur" == -* ]]; then
-    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --limit --context --help --version" -- "$cur") )
+    COMPREPLY=( $(compgen -W "--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --help --version" -- "$cur") )
   else
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
   fi
@@ -80,11 +80,17 @@ fn zsh() -> String {
         r#"#compdef code-search
 
 _code_search() {{
-  local -a commands index_cmds hooks_cmds shells
+  local -a commands index_cmds hooks_cmds shells global_opts
   commands=({commands})
   index_cmds=(build update status verify clean import-scip)
   hooks_cmds=(install uninstall status)
   shells=(bash zsh fish)
+  global_opts=(--path --output --include --exclude --hidden --no-ignore --lang --changed --cursor --allow-broad --limit --context --help --version)
+
+  if [[ "$words[CURRENT]" == -* ]]; then
+    _describe 'option' global_opts
+    return
+  fi
 
   if (( CURRENT == 2 )); then
     _describe 'command' commands
@@ -124,6 +130,7 @@ fn fish() -> String {
         "complete -c code-search -l lang -r".to_string(),
         "complete -c code-search -l changed".to_string(),
         "complete -c code-search -l cursor -r".to_string(),
+        "complete -c code-search -l allow-broad".to_string(),
         "complete -c code-search -l limit -r".to_string(),
         "complete -c code-search -l context -r".to_string(),
     ];

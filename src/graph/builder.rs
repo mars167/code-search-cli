@@ -170,6 +170,7 @@ fn build_tree_sitter_edges(backend: &mut PetgraphBackend, workspace: &Workspace)
         lang: Vec::new(),
         changed: false,
         cursor: None,
+        allow_broad: false,
         limit: 0,
     };
 

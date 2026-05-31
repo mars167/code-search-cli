@@ -146,6 +146,26 @@ pub fn with_page_meta(
     value
 }
 
+pub fn with_guard(mut value: Value, guard: Option<Value>) -> Value {
+    let Some(guard) = guard else {
+        return value;
+    };
+    if guard.get("triggered").and_then(Value::as_bool) == Some(true) {
+        if let Some(warnings) = value.get_mut("warnings").and_then(Value::as_array_mut) {
+            let reason = guard
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("broad_query");
+            warnings.push(json!({
+                "code": "broad_query_guard_triggered",
+                "message": format!("broad query guard triggered: {reason}")
+            }));
+        }
+    }
+    value["guard"] = guard;
+    value
+}
+
 pub fn with_summary_field(mut value: Value, field: &str, field_value: Value) -> Value {
     if let Some(summary) = value.get_mut("summary").and_then(Value::as_object_mut) {
         summary.insert(field.to_string(), field_value);
@@ -278,6 +298,21 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
                 .unwrap_or("unknown error")
         )?;
         return Ok(());
+    }
+
+    if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
+        let reason = value
+            .pointer("/guard/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("broad_query");
+        let suppressed = value
+            .pointer("/guard/suppressedResults")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        writeln!(
+            out,
+            "warning: broad query guard triggered ({reason}); suppressed {suppressed} results"
+        )?;
     }
 
     if let Some(results) = value.get("results").and_then(Value::as_array) {

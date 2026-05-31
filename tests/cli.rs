@@ -842,6 +842,185 @@ fn jsonl_summary_includes_cursor_and_facets() {
 }
 
 #[test]
+fn broad_find_returns_guarded_summary_samples() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src/main/java/example")).unwrap();
+    fs::create_dir_all(dir.path().join("src/app")).unwrap();
+    for idx in 0..8 {
+        fs::write(
+            dir.path()
+                .join(format!("src/main/java/example/Public{idx}.java")),
+            "public class Sample {}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(format!("src/app/public{idx}.ts")),
+            "export publicFunction = 'public';\n",
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "public"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["guard"]["triggered"], true);
+    assert_eq!(json["guard"]["reason"], "broad_literal_pattern");
+    assert!(json["guard"]["estimatedMatches"].as_u64().unwrap() > 5);
+    assert!(json["results"].as_array().unwrap().len() <= 5);
+    assert!(json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "broad_query_guard_triggered"));
+    assert!(json["summary"]["facets"]["language"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|facet| facet["value"] == "java"));
+}
+
+#[test]
+fn broad_grep_regex_is_guarded_by_default() {
+    let dir = tempdir().unwrap();
+    for idx in 0..10 {
+        fs::write(dir.path().join(format!("file{idx}.txt")), "anything\n").unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["grep", ".*"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["guard"]["triggered"], true);
+    assert_eq!(json["guard"]["reason"], "broad_regex_pattern");
+    assert_eq!(json["nextCursor"], Value::Null);
+    assert!(json["results"].as_array().unwrap().len() <= 5);
+}
+
+#[test]
+fn broad_files_star_returns_summary_samples() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    for idx in 0..9 {
+        fs::write(
+            dir.path().join(format!("src/file{idx}.rs")),
+            "fn main() {}\n",
+        )
+        .unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["files", "*"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["guard"]["triggered"], true);
+    assert_eq!(json["guard"]["reason"], "broad_path_pattern");
+    assert_eq!(json["guard"]["estimatedMatches"], 9);
+    assert_eq!(json["results"].as_array().unwrap().len(), 5);
+    assert!(json["summary"]["facets"]["topDir"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|facet| facet["value"] == "src" && facet["count"] == 9));
+}
+
+#[test]
+fn allow_broad_expands_with_limit_and_cursor() {
+    let dir = tempdir().unwrap();
+    for idx in 0..3 {
+        fs::write(dir.path().join(format!("file{idx}.txt")), "content\n").unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--allow-broad")
+        .arg("--limit")
+        .arg("2")
+        .args(["files", "*"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert!(json.get("guard").is_none());
+    assert_eq!(json["results"].as_array().unwrap().len(), 2);
+    assert_eq!(json["truncated"], true);
+    assert!(json["nextCursor"].as_str().is_some());
+}
+
+#[test]
+fn small_broad_literal_match_does_not_trigger_guard() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "x\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["find", "x"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert!(json.get("guard").is_none());
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+    assert!(!json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning["code"] == "broad_query_guard_triggered"));
+}
+
+#[test]
+fn text_output_reports_broad_guard_warning() {
+    let dir = tempdir().unwrap();
+    for idx in 0..6 {
+        fs::write(dir.path().join(format!("file{idx}.txt")), "anything\n").unwrap();
+    }
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--output")
+        .arg("text")
+        .args(["grep", ".*"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("warning: broad query guard triggered"));
+}
+
+#[test]
 fn json_output_includes_read_suggestions_and_next_actions() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -1775,6 +1954,20 @@ fn completions_print_shell_script_without_workspace() {
 
     assert!(script.contains("complete -F _code_search code-search"));
     assert!(script.contains("find grep files"));
+}
+
+#[test]
+fn zsh_completions_include_allow_broad_option() {
+    let output = code_search()
+        .args(["--path", "/definitely/missing", "completions", "zsh"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let script = String::from_utf8(output).unwrap();
+
+    assert!(script.contains("--allow-broad"));
 }
 
 #[test]

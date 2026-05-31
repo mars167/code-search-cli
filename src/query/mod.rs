@@ -33,6 +33,8 @@ pub struct QueryOptions {
     pub changed: bool,
     /// Pagination cursor.
     pub cursor: Option<String>,
+    /// Allow broad queries to return full paginated results.
+    pub allow_broad: bool,
     /// Maximum number of result items.
     pub limit: usize,
     /// Number of surrounding context lines (grep / find).
@@ -47,6 +49,7 @@ impl Default for QueryOptions {
             lang: vec![],
             changed: false,
             cursor: None,
+            allow_broad: false,
             limit: 100,
             context: 0,
         }
@@ -61,6 +64,7 @@ impl QueryOptions {
             lang: self.lang.clone(),
             changed: self.changed,
             cursor: self.cursor.clone(),
+            allow_broad: self.allow_broad,
             hidden: false,
             no_ignore: false,
             limit: self.limit,
@@ -111,12 +115,7 @@ impl QueryService {
             qo.results.clone(),
             Vec::new(),
         );
-        Ok(self.finalize(output::with_page_meta(
-            response,
-            qo.truncated,
-            qo.next_cursor,
-            qo.facets,
-        )))
+        Ok(self.finalize(page_response(response, qo)))
     }
 
     /// Regex search (delegates to `search::find` with mode=regex).
@@ -143,12 +142,7 @@ impl QueryService {
             qo.results.clone(),
             Vec::new(),
         );
-        Ok(self.finalize(output::with_page_meta(
-            response,
-            qo.truncated,
-            qo.next_cursor,
-            qo.facets,
-        )))
+        Ok(self.finalize(page_response(response, qo)))
     }
 
     /// Find files whose path contains `pattern` (substring match).
@@ -168,12 +162,7 @@ impl QueryService {
             qo.results.clone(),
             Vec::new(),
         );
-        Ok(self.finalize(output::with_page_meta(
-            response,
-            qo.truncated,
-            qo.next_cursor,
-            qo.facets,
-        )))
+        Ok(self.finalize(page_response(response, qo)))
     }
 
     /// Find files by strict glob pattern.
@@ -190,12 +179,7 @@ impl QueryService {
             qo.results.clone(),
             Vec::new(),
         );
-        Ok(self.finalize(output::with_page_meta(
-            response,
-            qo.truncated,
-            qo.next_cursor,
-            qo.facets,
-        )))
+        Ok(self.finalize(page_response(response, qo)))
     }
 
     // ------------------------------------------------------------------
@@ -326,12 +310,7 @@ impl QueryService {
             vec!["refs is identifier-boundary text search unless a precise occurrence index is available"
                 .to_string()],
         );
-        Ok(self.finalize(output::with_page_meta(
-            response,
-            qo.truncated,
-            qo.next_cursor,
-            qo.facets,
-        )))
+        Ok(self.finalize(page_response(response, qo)))
     }
 
     /// Find symbols matching `query` — prefers SCIP; falls back to tree-sitter.
@@ -508,6 +487,13 @@ fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {
     query
 }
 
+fn page_response(value: Value, page: search::QueryOutput) -> Value {
+    output::with_guard(
+        output::with_page_meta(value, page.truncated, page.next_cursor, page.facets),
+        page.guard,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -562,6 +548,30 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("worktree:"));
+    }
+
+    #[test]
+    fn find_includes_broad_guard_for_query_service_consumers() {
+        let dir = tempdir().unwrap();
+        for idx in 0..6 {
+            fs::write(
+                dir.path().join(format!("file{idx}.rs")),
+                "pub fn sample() { println!(\"public\"); }\n",
+            )
+            .unwrap();
+        }
+        let svc = QueryService::new(dir.path()).unwrap();
+
+        let result = svc.find("public", &QueryOptions::default()).unwrap();
+
+        assert_eq!(result["guard"]["triggered"], true);
+        assert_eq!(result["guard"]["reason"], "broad_literal_pattern");
+        assert_eq!(result["results"].as_array().unwrap().len(), 5);
+        assert!(result["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["code"] == "broad_query_guard_triggered"));
     }
 
     #[test]

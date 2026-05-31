@@ -64,6 +64,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" },
                     "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
                 },
@@ -83,6 +84,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" },
                     "context": { "type": "integer", "default": 0, "description": "Lines of context around each match" }
                 },
@@ -103,6 +105,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
@@ -121,6 +124,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
@@ -153,6 +157,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
@@ -172,6 +177,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["identifier"]
@@ -191,6 +197,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "Languages to include" },
                     "changed": { "type": "boolean", "default": false, "description": "Restrict search to git changed files" },
                     "cursor": { "type": "string", "description": "Pagination cursor from a previous response" },
+                    "allowBroad": { "type": "boolean", "default": false, "description": "Allow broad queries to return full paginated results" },
                     "limit": { "type": "integer", "default": 100, "description": "Max results" }
                 },
                 "required": ["query"]
@@ -507,6 +514,11 @@ fn parse_query_options(args: Option<&Value>) -> QueryOptions {
             .get("cursor")
             .and_then(|v| v.as_str())
             .map(ToString::to_string),
+        allow_broad: obj
+            .get("allowBroad")
+            .or_else(|| obj.get("allow_broad"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         limit: obj
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -807,6 +819,7 @@ mod tests {
             "lang": ["rust"],
             "changed": true,
             "cursor": "v1:abc:10",
+            "allowBroad": true,
             "limit": 50,
             "context": 3
         });
@@ -816,6 +829,7 @@ mod tests {
         assert_eq!(opts.lang, vec!["rust"]);
         assert!(opts.changed);
         assert_eq!(opts.cursor.as_deref(), Some("v1:abc:10"));
+        assert!(opts.allow_broad);
         assert_eq!(opts.limit, 50);
         assert_eq!(opts.context, 3);
     }

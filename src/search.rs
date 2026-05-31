@@ -21,6 +21,7 @@ use crate::{
 
 const MAX_FULL_READ_BYTES: usize = 64 * 1024;
 const MAX_PREVIEW_CHARS: usize = 240;
+const BROAD_SAMPLE_LIMIT: usize = 5;
 
 pub struct QueryOutput {
     pub results: Value,
@@ -28,6 +29,7 @@ pub struct QueryOutput {
     pub truncated: bool,
     pub next_cursor: Option<String>,
     pub facets: Value,
+    pub guard: Option<Value>,
 }
 
 pub struct Page {
@@ -35,6 +37,13 @@ pub struct Page {
     pub truncated: bool,
     pub next_cursor: Option<String>,
     pub facets: Value,
+    pub guard: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct BroadGuard {
+    reason: &'static str,
+    suggestion: &'static str,
 }
 
 pub fn files(
@@ -49,13 +58,19 @@ pub fn files(
     } else {
         None
     };
+    let guard = broad_guard(if strict_glob { "glob" } else { "files" }, pattern, None);
+    let broad_path = guard
+        .as_ref()
+        .map(|guard| guard.reason == "broad_path_pattern")
+        .unwrap_or(false);
 
     let source = candidate_file_catalog(workspace, opts)?;
     for file in source.records {
-        let matches = matcher
-            .as_ref()
-            .map(|glob| glob.is_match(&file.path))
-            .unwrap_or_else(|| file.path.contains(pattern));
+        let matches = broad_path
+            || matcher
+                .as_ref()
+                .map(|glob| glob.is_match(&file.path))
+                .unwrap_or_else(|| file.path.contains(pattern));
         if matches {
             results.push(json!({
                 "path": file.path,
@@ -72,6 +87,7 @@ pub fn files(
         results,
         source.index,
         opts,
+        guard,
         &pagination_scope(
             if strict_glob { "glob" } else { "files" },
             json!({ "pattern": pattern, "strictGlob": strict_glob }),
@@ -251,6 +267,7 @@ pub fn find(
         results,
         source.index,
         opts,
+        broad_guard(if refs_mode { "refs" } else { "find" }, pattern, Some(mode)),
         &pagination_scope(
             if refs_mode { "refs" } else { "find" },
             json!({ "pattern": pattern, "mode": mode, "context": context }),
@@ -423,15 +440,17 @@ fn paged_query_output(
     results: Vec<Value>,
     index: Value,
     opts: &ScanOptions,
+    guard: Option<BroadGuard>,
     scope: &str,
 ) -> Result<QueryOutput> {
-    let page = page_results_vec(results, opts, scope)?;
+    let page = page_results_vec(results, opts, guard, scope)?;
     Ok(QueryOutput {
         results: page.results,
         index,
         truncated: page.truncated,
         next_cursor: page.next_cursor,
         facets: page.facets,
+        guard: page.guard,
     })
 }
 
@@ -448,20 +467,32 @@ pub fn page_results(
             truncated: false,
             next_cursor: None,
             facets: result_facets(&[]),
+            guard: None,
         });
     };
     page_results_vec(
         results,
         opts,
+        None,
         &pagination_scope(kind, args, opts, snapshot_id),
     )
 }
 
-fn page_results_vec(mut results: Vec<Value>, opts: &ScanOptions, scope: &str) -> Result<Page> {
+fn page_results_vec(
+    mut results: Vec<Value>,
+    opts: &ScanOptions,
+    guard: Option<BroadGuard>,
+    scope: &str,
+) -> Result<Page> {
     sort_results(&mut results);
     let result_set_hash = value_hash(&Value::Array(results.clone()));
     let scope = format!("{scope}|resultSet:{result_set_hash}");
     let facets = result_facets(&results);
+    if let Some(guard) = guard {
+        if !opts.allow_broad && results.len() > BROAD_SAMPLE_LIMIT {
+            return Ok(guarded_page(results, facets, guard));
+        }
+    }
     let offset = cursor_offset(opts.cursor.as_deref(), &scope)?;
     let total = results.len();
     let limit = opts.limit;
@@ -482,7 +513,91 @@ fn page_results_vec(mut results: Vec<Value>, opts: &ScanOptions, scope: &str) ->
         truncated,
         next_cursor,
         facets,
+        guard: None,
     })
+}
+
+fn guarded_page(results: Vec<Value>, facets: Value, guard: BroadGuard) -> Page {
+    let total = results.len();
+    let matched_files = results
+        .iter()
+        .filter_map(|result| result.get("path").and_then(Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let sample: Vec<Value> = results.into_iter().take(BROAD_SAMPLE_LIMIT).collect();
+    let suppressed = total.saturating_sub(sample.len());
+    let guard_value = json!({
+        "triggered": true,
+        "reason": guard.reason,
+        "estimatedMatches": total,
+        "matchedFiles": matched_files,
+        "sampleLimit": BROAD_SAMPLE_LIMIT,
+        "suppressedResults": suppressed,
+        "facets": facets,
+        "sampleResults": sample,
+        "nextActions": [
+            {
+                "kind": "narrow_query",
+                "reason": guard.suggestion
+            },
+            {
+                "kind": "allow_broad",
+                "reason": "rerun with --allow-broad and an explicit --limit to page through full results"
+            }
+        ]
+    });
+    Page {
+        results: guard_value["sampleResults"].clone(),
+        truncated: suppressed > 0,
+        next_cursor: None,
+        facets: guard_value["facets"].clone(),
+        guard: Some(guard_value),
+    }
+}
+
+fn broad_guard(kind: &str, pattern: &str, mode: Option<&str>) -> Option<BroadGuard> {
+    let trimmed = pattern.trim();
+    if matches!(kind, "files" | "glob") && matches!(trimmed, "" | "*" | "**" | "**/*" | ".*") {
+        return Some(BroadGuard {
+            reason: "broad_path_pattern",
+            suggestion: "add --include/--exclude or use a stricter glob/path substring",
+        });
+    }
+    if mode == Some("regex") && matches!(trimmed, ".*" | ".+" | "^.*$" | "^.+$") {
+        return Some(BroadGuard {
+            reason: "broad_regex_pattern",
+            suggestion: "use a more specific regex or add --include/--lang/--changed scope",
+        });
+    }
+    if matches!(kind, "find" | "refs") && is_broad_literal(trimmed) {
+        return Some(BroadGuard {
+            reason: "broad_literal_pattern",
+            suggestion: "search a more specific token or add --include/--lang/--changed scope",
+        });
+    }
+    None
+}
+
+fn is_broad_literal(pattern: &str) -> bool {
+    matches!(
+        pattern,
+        "" | "*"
+            | "public"
+            | "private"
+            | "protected"
+            | "class"
+            | "function"
+            | "fn"
+            | "let"
+            | "const"
+            | "var"
+            | "if"
+            | "for"
+            | "while"
+            | "return"
+            | "import"
+            | "export"
+    ) || pattern.chars().count() <= 1
 }
 
 fn cursor_offset(cursor: Option<&str>, scope: &str) -> Result<usize> {
@@ -543,6 +658,7 @@ pub fn scope_value(opts: &ScanOptions) -> Value {
         "hidden": opts.hidden,
         "noIgnore": opts.no_ignore,
         "cursor": &opts.cursor,
+        "allowBroad": opts.allow_broad,
         "limit": opts.limit
     })
 }
@@ -555,6 +671,7 @@ fn pagination_scope_value(opts: &ScanOptions) -> Value {
         "changed": opts.changed,
         "hidden": opts.hidden,
         "noIgnore": opts.no_ignore,
+        "allowBroad": opts.allow_broad,
         "limit": opts.limit
     })
 }

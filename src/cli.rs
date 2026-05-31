@@ -32,6 +32,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub cursor: Option<String>,
 
+    #[arg(long, global = true)]
+    pub allow_broad: bool,
+
     #[arg(long, global = true, default_value_t = 100)]
     pub limit: usize,
 
