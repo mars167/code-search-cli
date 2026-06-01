@@ -118,7 +118,7 @@ flowchart LR
   Verify -->|mismatch| RU["remote_unverified"]
 ```
 
-Remote 适合 CI 产物、大仓预热和团队共享。只要本地文件无法与 remote snapshot 对齐，结果就必须降级，Agent 需要用 `read` 重新验证。
+Remote 适合 CI 产物、大仓预热和团队共享。只要本地文件无法与 remote snapshot 对齐，结果就必须降级，调用方需要用 `read` 重新验证。
 
 ## Saved Query
 
@@ -133,4 +133,4 @@ flowchart LR
   Current -->|no, --snapshot saved| Error["reject replay"]
 ```
 
-Saved query 只保存可重放命令、query 参数、scope、snapshot 和 cursor 元数据，不保存结果正文。它是 Agent 工作流加速层，不是事实源；重放结果仍受当前 snapshot、freshness 和 reliability 契约约束。
+Saved query 只保存可重放命令、query 参数、scope、snapshot 和 cursor 元数据，不保存结果正文。它是查询工作流加速层，不是事实源；重放结果仍受当前 snapshot、freshness 和 reliability 契约约束。
