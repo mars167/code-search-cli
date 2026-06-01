@@ -1,7 +1,5 @@
 # 设计总览
 
-> 长期设计入口。本文记录稳定边界；过程记录、任务拆解、计划和一次性报告不放在 `docs/`。
-
 ## 阅读地图
 
 ```mermaid
@@ -14,16 +12,16 @@ flowchart LR
   Q --> SCRIPTS["scripts/ 是门禁权威"]
 ```
 
-| 文档 | 保留内容 | 不保留内容 |
-| --- | --- | --- |
-| `00-design-summary.md` | 产品定位、系统图、文档规则 | 历史决策过程 |
-| `01-architecture.md` | snapshot/index/query/freshness 边界 | 模块逐行说明 |
-| `02-command-contract.md` | Agent 依赖的 JSON 与 reliability 契约 | 每个 flag 的重复清单 |
-| `03-quality.md` | 验证入口和门禁分层 | 临时测试记录 |
+| 文档 | 内容 |
+| --- | --- |
+| `00-design-summary.md` | 产品定位、系统图、可靠性等级 |
+| `01-architecture.md` | snapshot/index/query/freshness 边界 |
+| `02-command-contract.md` | 命令族、JSON 响应和 reliability 契约 |
+| `03-quality.md` | 验证入口、门禁分层和 CI 映射 |
 
 ## 产品定位
 
-`code-search` 是本地优先、Git 优先的代码搜索与跳转工具，目标是让 Agent 像使用 IDE 一样获取窄而可靠的代码证据。
+`code-search` 是本地优先、Git 优先的代码搜索与跳转工具，目标是让开发者和自动化工具像使用 IDE 一样获取窄而可靠的代码证据。
 
 它提供：
 
@@ -38,13 +36,13 @@ flowchart LR
 - 把启发式调用图伪装成精确事实。
 - 用 remote 结果覆盖本地 dirty/staged 状态。
 - 用 watcher 替代 Git hook 或 staged/commit snapshot。
-- 在文档里复制源码已经能说明的模块和参数细节。
+- 把源码、测试和脚本中已经明确表达的实现细节重复成第二份说明。
 
 ## 系统图
 
 ```mermaid
 flowchart TB
-  Agent["Agent / developer"] --> Entry["CLI / MCP"]
+  Actor["Developer / automation"] --> Entry["CLI / MCP"]
   Entry --> Query["Query layer"]
   Entry --> Saved["Saved query store"]
 
@@ -80,10 +78,9 @@ flowchart TB
 | `remote_verified` | 与本地 file proof 对齐的 remote snapshot | `false` | 可作为加速结果；关键编辑仍用 `read` 复核 |
 | `remote_unverified` | 未能与本地文件对齐的 remote snapshot | `false` | 只能作为线索，不能直接用于编辑决策 |
 
-## 文档规则
+## 贡献者参考
 
-- `docs/` 只放长期 Markdown 设计文档。
-- 过程型文件不进入仓库文档：`task`、`plan`、`roadmap`、MR 执行记录、一次性 benchmark/test report 都应外置。
-- 图优先，长段落从简；能由源码、测试或脚本说明的问题不写二次文档。
-- 文档描述边界和契约，不描述每个函数的实现细节。
-- 新增文档必须能被上面的阅读地图解释；不能解释就不要新增。
+- 命令行参数以 `code-search --help` 和 `src/cli.rs` 为准。
+- 行为细节以 `src/`、`tests/` 和 `scripts/` 为准。
+- 设计文档描述稳定边界和外部契约，避免重复每个函数的实现细节。
+- 新增命令、索引或输出字段时，同时更新对应的测试和契约说明。

@@ -1,6 +1,6 @@
 # 命令契约
 
-> 命令参数以 `code-search --help` 和 `src/cli.rs` 为准。本文只保留 Agent 依赖的稳定契约。
+> 命令参数以 `code-search --help` 和 `src/cli.rs` 为准。本文描述调用方可以依赖的稳定命令和 JSON 契约。
 
 ## 命令族
 
@@ -31,7 +31,7 @@ flowchart TB
 | 关系 | `calls`, `callers` | 永远是 `inferred_candidate` |
 | Saved query | `--save-query`, `query replay/show/list/delete` | 保存可重放 query/scope/snapshot/cursor 元数据，不保存结果正文 |
 | 索引 | `index ...`, `hooks ...` | 维护 freshness 和本地/remote 缓存 |
-| Agent 集成 | `mcp`, `serve`, `watch` | 包装同一套 query service 和 watcher 状态 |
+| 集成接口 | `mcp`, `serve`, `watch` | 包装同一套 query service 和 watcher 状态 |
 
 ## JSON 响应形态
 
@@ -77,12 +77,12 @@ flowchart TB
 - `command` 保留用户调用的入口名。
 - `canonicalCommand` 表示归一化后的能力名。
 - `schemaVersion` 使用兼容版本号；同一 major 内只新增可选字段或扩展枚举值，不移除既有稳定字段。
-- `query.normalized=true` 表示命令参数已按 CLI 契约归一化，便于 agent 重放与调试。
+- `query.normalized=true` 表示命令参数已按 CLI 契约归一化，便于重放与调试。
 - `snapshot_id` 表示结果绑定的 Git/worktree 视角。
-- `reliability` 告诉 Agent 是否能把结果当作事实。
+- `reliability` 告诉调用方是否能把结果当作事实。
 - `index` 只描述缓存是否参与和是否新鲜。
 - `budget` 描述本次输出预算：`tier` 按仓库规模/命中量分为 `small`、`medium`、`large`，并暴露 `maxResults`、`maxPreviewChars`、`maxContextLines` 和 `reason`。宽查询 guard 仍是硬保护；budget 是常规输出压缩策略。
-- `suggestedReads` 和每条结果上的 `readCommand` 是 Agent 进入编辑前的优先验证路径。
+- `suggestedReads` 和每条结果上的 `readCommand` 是进入编辑前的优先验证路径。
 - `nextActions` 暴露可执行的收窄、翻页、重放或 broad-query 处理建议。
 - `savedQuery` 只在保存、重放或管理 saved query 时出现，包含 name、path、command、snapshotId、currentSnapshotId、snapshotMatch、requestCursor 和 nextCursor 等元数据。
 - `noMatch` 只出现在搜索/导航类命令的空结果响应中，说明空结果原因、实际 scope、index 使用状态，并配套可执行 `nextActions`。空结果不代表符号或文本不存在。
@@ -108,7 +108,7 @@ flowchart LR
 - `parser_fact` 可以是确定性语法事实，但不能代表 precise semantic reference resolution。
 - `calls` 和 `callers` 即使来自图索引，也必须标为候选。
 - remote 结果必须声明是否与本地文件 proof 对齐；`remote_verified` 仍是共享缓存结果，关键编辑前仍要 `read`。
-- Agent 修改代码前应对关键结果执行 `read <file[:range]>`。
+- 自动化工具或开发者修改代码前应对关键结果执行 `read <file[:range]>`。
 
 ## Saved Query Replay
 
@@ -124,13 +124,13 @@ flowchart LR
 
 ## Text 输出
 
-`--output json` 是默认 Agent 契约，保留完整字段、preview/context、`suggestedReads` 和 `nextActions`。
+`--output json` 是默认自动化契约，保留完整字段、preview/context、`suggestedReads` 和 `nextActions`。
 
-`--output compact-json` 保留同一 envelope 与可验证字段，但移除 `preview`、`context`、`content`、`matchText` 这类大字段；Agent 仍应通过 `readCommand` 精确读取源码。
+`--output compact-json` 保留同一 envelope 与可验证字段，但移除 `preview`、`context`、`content`、`matchText` 这类大字段；调用方仍应通过 `readCommand` 精确读取源码。
 
 `--output jsonl` 面向长结果流式消费：每条命中输出一个 `result` event，最后输出一个 `summary` event；错误输出 `error` event。
 
-`--output text` 只面向人类快速查看，不是 Agent 契约。
+`--output text` 只面向人类快速查看，不建议作为自动化集成格式。
 
 ## 退出码
 
