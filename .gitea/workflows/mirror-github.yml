@@ -17,6 +17,9 @@ jobs:
     name: Force Push GitHub Mirror
     runs-on: ubuntu-latest
     steps:
+      - name: Configure internal Gitea TLS
+        run: git config --global http.https://git.home.arpa/.sslVerify false
+
       - name: Checkout Gitea ref
         uses: actions/checkout@v4
         with:
