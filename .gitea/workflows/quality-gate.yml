@@ -26,6 +26,9 @@ env:
   SCCACHE_CACHE_SIZE: 8G
   RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
+  RUOYI_REPO_URL: https://git.home.arpa/mars/RuoYi.git
+  RUOYI_BRANCH: master
+  RUOYI_CACHE_DIR: /cache/code-search/fixtures/RuoYi
 
 jobs:
   pr-gate:
@@ -34,6 +37,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     container:
       image: rust:1.95-bookworm
+      options: --volume code-search-cache:/cache/code-search
     steps:
       - name: Prepare CI tools
         run: |
@@ -59,6 +63,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     container:
       image: rust:1.95-bookworm
+      options: --volume code-search-cache:/cache/code-search
     steps:
       - name: Prepare CI tools
         run: |
@@ -72,10 +77,13 @@ jobs:
         run: git config --global http.https://git.home.arpa/.sslVerify false
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Prepare RuoYi fixture cache
+        run: scripts/prepare-ruoyi-fixture.sh
       - name: Run main quality gate
         run: scripts/quality-gate.sh main
         env:
           REQUIRE_TEST_REPO: "1"
+          TEST_REPO: ${{ env.RUOYI_CACHE_DIR }}
       - name: Show compiler cache stats
         if: ${{ always() }}
         run: sccache --show-stats || true
@@ -86,6 +94,7 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     container:
       image: rust:1.95-bookworm
+      options: --volume code-search-cache:/cache/code-search
     steps:
       - name: Prepare cross tools
         run: |
@@ -111,6 +120,7 @@ jobs:
     if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bench == 'true') }}
     container:
       image: rust:1.95-bookworm
+      options: --volume code-search-cache:/cache/code-search
     steps:
       - name: Prepare benchmark tools
         run: |
@@ -124,10 +134,13 @@ jobs:
         run: git config --global http.https://git.home.arpa/.sslVerify false
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Prepare RuoYi fixture cache
+        run: scripts/prepare-ruoyi-fixture.sh
       - name: Run benchmark quality gate
         run: scripts/quality-gate.sh bench
         env:
           REQUIRE_TEST_REPO: "1"
+          TEST_REPO: ${{ env.RUOYI_CACHE_DIR }}
       - name: Show compiler cache stats
         if: ${{ always() }}
         run: sccache --show-stats || true
