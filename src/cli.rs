@@ -8,7 +8,7 @@ pub struct Cli {
     #[arg(short, long, default_value = ".")]
     pub path: String,
 
-    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,
 
     #[arg(long, global = true)]
@@ -48,7 +48,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Json,
     CompactJson,

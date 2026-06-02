@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::{
-    cli::{Cli, Command, HooksCommand, IndexCommand, QueryCommand},
+    cli::{Cli, Command, HooksCommand, IndexCommand, OutputFormat, QueryCommand},
     completions, graph, index, output, saved_query, scip_index, search, syntax,
     workspace::{ScanOptions, Workspace},
     AppResult,
@@ -548,24 +548,35 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 staged,
                 changed,
                 force,
-            } => output::response(
-                "index build",
-                "index build",
-                json!({ "staged": staged, "changed": changed, "force": force }),
-                &workspace.snapshot_id,
-                output::freshness(),
-                json!([index::build(
-                    &workspace, &scan_opts, *staged, *changed, *force
-                )?]),
-                Vec::new(),
-            ),
+            } => {
+                let result = with_progress(
+                    &cli.output,
+                    "Building index",
+                    "Index build complete",
+                    || index::build(&workspace, &scan_opts, *staged, *changed, *force),
+                )?;
+                output::response(
+                    "index build",
+                    "index build",
+                    json!({ "staged": staged, "changed": changed, "force": force }),
+                    &workspace.snapshot_id,
+                    output::freshness(),
+                    json!([result]),
+                    Vec::new(),
+                )
+            }
             IndexCommand::Update => output::response(
                 "index update",
                 "index update",
                 json!({}),
                 &workspace.snapshot_id,
                 output::freshness(),
-                json!([index::update(&workspace, &scan_opts)?]),
+                json!([with_progress(
+                    &cli.output,
+                    "Updating index",
+                    "Index update complete",
+                    || index::update(&workspace, &scan_opts)
+                )?]),
                 Vec::new(),
             ),
             IndexCommand::Status => output::response(
@@ -610,13 +621,20 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                         .unwrap_or(bytes.len());
                     !bytes[pos..].is_empty() && bytes[pos..][0] == b'{'
                 };
-                let value = if is_json {
-                    // JSON format (compatibility)
-                    scip_index::import_scip_json(&workspace, path)?
-                } else {
-                    // Native SCIP protobuf format
-                    scip_index::import_native_scip(&workspace, path)?
-                };
+                let value = with_progress(
+                    &cli.output,
+                    "Importing SCIP index",
+                    "SCIP import complete",
+                    || {
+                        if is_json {
+                            // JSON format (compatibility)
+                            scip_index::import_scip_json(&workspace, path)
+                        } else {
+                            // Native SCIP protobuf format
+                            scip_index::import_native_scip(&workspace, path)
+                        }
+                    },
+                )?;
                 output::response(
                     "index import-scip",
                     "index import-scip",
@@ -628,7 +646,10 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 )
             }
             IndexCommand::Pack { output } => {
-                let value = index::pack(&workspace, output)?;
+                let value =
+                    with_progress(&cli.output, "Packing index", "Index pack complete", || {
+                        index::pack(&workspace, output)
+                    })?;
                 output::response(
                     "index pack",
                     "index pack",
@@ -640,7 +661,12 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 )
             }
             IndexCommand::Unpack { path } => {
-                let value = index::unpack(&workspace, path)?;
+                let value = with_progress(
+                    &cli.output,
+                    "Unpacking index",
+                    "Index unpack complete",
+                    || index::unpack(&workspace, path),
+                )?;
                 output::response(
                     "index unpack",
                     "index unpack",
@@ -701,6 +727,21 @@ fn emit_response(
     let exit_code = output::no_match_exit(&value["results"]);
     output::emit(format, &value)?;
     Ok(exit_code)
+}
+
+fn with_progress<T, F>(
+    format: &OutputFormat,
+    start_message: &str,
+    finish_message: &str,
+    work: F,
+) -> AppResult<T>
+where
+    F: FnOnce() -> AppResult<T>,
+{
+    let progress = output::ProgressIndicator::start(format, start_message);
+    let result = work();
+    progress.finish(if result.is_ok() { finish_message } else { "" });
+    result
 }
 
 fn attach_saved_query(

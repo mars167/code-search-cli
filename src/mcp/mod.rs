@@ -18,9 +18,8 @@
 //!   │                                │
 //! ```
 //!
-//! All results carry reliability metadata
-//! (`snapshot_id`, `reliability`, `producer`, `exact`) produced by the
-//! underlying [`QueryService`].
+//! Tool results use the same public JSON projection as CLI `--output json`:
+//! `results`, `page`, and `caveats`.
 
 use std::io::{self, BufRead, Write};
 
@@ -519,10 +518,11 @@ impl Server {
 }
 
 fn tool_result(value: Value, is_error: bool) -> ToolCallResult {
+    let public = output::public_response_value(&value);
     ToolCallResult {
         content: vec![ToolResultContent {
             content_type: "text".to_string(),
-            text: value.to_string(),
+            text: public.to_string(),
         }],
         is_error,
     }
@@ -691,6 +691,14 @@ mod tests {
         serde_json::from_str(&result.content[0].text).unwrap()
     }
 
+    fn has_caveat(value: &Value, code: &str) -> bool {
+        value["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caveat| caveat["code"] == code)
+    }
+
     // ------------------------------------------------------------------
     //  Protocol-level tests  (unit)
     // ------------------------------------------------------------------
@@ -781,9 +789,10 @@ mod tests {
                 assert!(!result.is_error);
                 let text = &result.content[0].text;
                 let parsed: Value = serde_json::from_str(text).unwrap();
-                assert_eq!(parsed["ok"], true);
-                assert_eq!(parsed["reliability"]["level"], "source_fact");
+                assert!(parsed.get("ok").is_none());
+                assert!(parsed.get("reliability").is_none());
                 assert_eq!(parsed["results"][0]["path"], "src/main.rs");
+                assert!(parsed["caveats"].as_array().unwrap().is_empty());
             }
             _ => panic!("expected success response"),
         }
@@ -817,11 +826,8 @@ mod tests {
                 assert!(!result.is_error);
                 let text = &result.content[0].text;
                 let parsed: Value = serde_json::from_str(text).unwrap();
-                assert_eq!(parsed["ok"], true);
-                assert!(
-                    parsed["reliability"]["level"] == "parser_fact"
-                        || parsed["reliability"]["level"] == "precise_fact"
-                );
+                assert!(parsed.get("ok").is_none());
+                assert!(parsed.get("reliability").is_none());
                 let results = parsed["results"].as_array().unwrap();
                 assert!(results.iter().any(|r| r["name"] == "alpha"));
             }
@@ -851,8 +857,8 @@ mod tests {
                 let result: ToolCallResult = serde_json::from_value(sr.result).unwrap();
                 assert!(result.is_error);
                 let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
-                assert_eq!(parsed["ok"], false);
-                assert_eq!(parsed["error"]["code"], "unknown_tool");
+                assert!(parsed["results"].as_array().unwrap().is_empty());
+                assert!(has_caveat(&parsed, "unknown_tool"));
             }
             _ => panic!("expected success for unknown tool"),
         }
@@ -903,11 +909,9 @@ mod tests {
                 assert!(!result.is_error);
                 let text = &result.content[0].text;
                 let parsed: Value = serde_json::from_str(text).unwrap();
-                assert_eq!(parsed["ok"], true);
-                assert_eq!(parsed["reliability"]["level"], "source_fact");
-                assert!(parsed["summary"]["changed"]["changedCount"]
-                    .as_u64()
-                    .is_some());
+                assert!(parsed.get("ok").is_none());
+                assert!(parsed["results"].as_array().is_some());
+                assert!(parsed["page"].is_object());
             }
             _ => panic!("expected success response"),
         }
@@ -936,7 +940,7 @@ mod tests {
                 assert!(!result.is_error);
                 let text = &result.content[0].text;
                 let parsed: Value = serde_json::from_str(text).unwrap();
-                assert_eq!(parsed["ok"], true);
+                assert!(parsed.get("ok").is_none());
                 let items = parsed["results"].as_array().unwrap();
                 assert!(items[0]["snapshot_id"].as_str().is_some());
             }
@@ -957,9 +961,8 @@ mod tests {
             "code_search_list",
             json!({ "dir": "src", "recursive": false }),
         );
-        assert_eq!(list["ok"], true);
-        assert_eq!(list["command"], "list");
-        assert_eq!(list["canonicalCommand"], "list");
+        assert!(list.get("ok").is_none());
+        assert!(list.get("command").is_none());
         assert!(list["results"]
             .as_array()
             .unwrap()
@@ -971,9 +974,8 @@ mod tests {
             "code_search_tree",
             json!({ "dir": "src", "depth": 2 }),
         );
-        assert_eq!(tree["ok"], true);
-        assert_eq!(tree["command"], "tree");
-        assert_eq!(tree["canonicalCommand"], "tree");
+        assert!(tree.get("ok").is_none());
+        assert!(tree.get("command").is_none());
         assert!(tree["results"]
             .as_array()
             .unwrap()
@@ -996,8 +998,7 @@ mod tests {
         );
         assert!(lang_result.is_error);
         let lang_error: Value = serde_json::from_str(&lang_result.content[0].text).unwrap();
-        assert_eq!(lang_error["ok"], false);
-        assert_eq!(lang_error["error"]["code"], "unsupported_mcp_scope");
+        assert!(has_caveat(&lang_error, "unsupported_mcp_scope"));
 
         let changed_result = call_tool(
             &server,
@@ -1006,7 +1007,7 @@ mod tests {
         );
         assert!(changed_result.is_error);
         let changed_error: Value = serde_json::from_str(&changed_result.content[0].text).unwrap();
-        assert_eq!(changed_error["error"]["code"], "unsupported_mcp_scope");
+        assert!(has_caveat(&changed_error, "unsupported_mcp_scope"));
 
         let depth_result = call_tool(
             &server,
@@ -1015,8 +1016,7 @@ mod tests {
         );
         assert!(depth_result.is_error);
         let depth_error: Value = serde_json::from_str(&depth_result.content[0].text).unwrap();
-        assert_eq!(depth_error["ok"], false);
-        assert_eq!(depth_error["error"]["code"], "invalid_mcp_argument");
+        assert!(has_caveat(&depth_error, "invalid_mcp_argument"));
 
         for invalid_depth in [json!(-1), json!(1.5)] {
             let invalid_result = call_tool(
@@ -1027,7 +1027,7 @@ mod tests {
             assert!(invalid_result.is_error);
             let invalid_error: Value =
                 serde_json::from_str(&invalid_result.content[0].text).unwrap();
-            assert_eq!(invalid_error["error"]["code"], "invalid_mcp_argument");
+            assert!(has_caveat(&invalid_error, "invalid_mcp_argument"));
         }
     }
 
@@ -1040,9 +1040,8 @@ mod tests {
         let result = call_tool(&server, "code_search_grep", json!({ "pattern": "[" }));
         assert!(result.is_error);
         let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        assert_eq!(parsed["ok"], false);
-        assert_ne!(parsed["error"]["code"], "no_match");
-        assert!(parsed["error"]["code"].as_str().is_some());
+        assert!(!has_caveat(&parsed, "no_match"));
+        assert!(parsed["caveats"][0]["code"].as_str().is_some());
     }
 
     #[test]
@@ -1059,8 +1058,7 @@ mod tests {
             );
             assert!(result.is_error);
             let parsed: Value = serde_json::from_str(&result.content[0].text).unwrap();
-            assert_eq!(parsed["ok"], false);
-            assert_eq!(parsed["error"]["code"], "invalid_mcp_argument");
+            assert!(has_caveat(&parsed, "invalid_mcp_argument"));
         }
     }
 
@@ -1080,20 +1078,17 @@ mod tests {
             "code_search_find",
             json!({ "text": "needle", "context": 1 }),
         );
-        assert_eq!(found["ok"], true);
+        assert!(found.get("ok").is_none());
         assert_eq!(found["results"][0]["path"], "src/main.rs");
-        assert!(found["nextActions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action["kind"] == "read"));
-        let target = found["results"][0]["readCommandArgv"][4]
-            .as_str()
-            .unwrap()
-            .to_string();
+        assert!(found["results"][0].get("readCommandArgv").is_none());
+        let path = found["results"][0]["path"].as_str().unwrap();
+        let line = found["results"][0]["range"]["start"]["line"]
+            .as_u64()
+            .unwrap();
+        let target = format!("{path}:{line}");
 
         let read = call_tool_json(&server, "code_search_read", json!({ "target": target }));
-        assert_eq!(read["ok"], true);
+        assert!(read.get("ok").is_none());
         assert!(read["results"][0]["content"]
             .as_str()
             .unwrap()
@@ -1113,19 +1108,9 @@ mod tests {
         let server = Server::new(dir.path()).unwrap();
 
         let found = call_tool_json(&server, "code_search_find", json!({ "text": "public" }));
-        assert_eq!(found["guard"]["triggered"], true);
-        assert_eq!(found["guard"]["reason"], "broad_literal_pattern");
         assert!(found["results"].as_array().unwrap().len() <= 5);
-        assert!(found["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning["code"] == "broad_query_guard_triggered"));
-        assert!(found["guard"]["nextActions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action["kind"] == "allow_broad"));
+        assert!(has_caveat(&found, "broad_query_guard_triggered"));
+        assert!(has_caveat(&found, "broad_query_guard"));
     }
 
     // ------------------------------------------------------------------

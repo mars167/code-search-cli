@@ -1,6 +1,13 @@
+use std::io::IsTerminal;
 use std::{
     io::{self, Write},
     path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use anyhow::Error;
@@ -18,6 +25,33 @@ pub struct Reliability {
     pub source: &'static str,
     pub exact: bool,
     pub llm_instruction: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicResponse {
+    results: Value,
+    page: PublicPage,
+    caveats: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicPage {
+    truncated: bool,
+    next_cursor: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ResultEvent<'a> {
+    event: &'static str,
+    result: &'a Value,
+}
+
+#[derive(Debug, Serialize)]
+struct PageEvent {
+    event: &'static str,
+    page: PublicPage,
+    caveats: Vec<Value>,
 }
 
 pub fn source_fact() -> Reliability {
@@ -220,16 +254,16 @@ pub fn error_response_with_code(code: &str, message: impl Into<String>) -> Value
 
 pub fn emit(format: &OutputFormat, value: &Value) -> io::Result<()> {
     match format {
-        OutputFormat::Json => {
+        OutputFormat::Json if internal_json_enabled() => {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             serde_json::to_writer_pretty(&mut handle, value)?;
             writeln!(handle)?;
         }
-        OutputFormat::CompactJson => {
+        OutputFormat::Json | OutputFormat::CompactJson => {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
-            serde_json::to_writer_pretty(&mut handle, &compact_value(value))?;
+            serde_json::to_writer_pretty(&mut handle, &public_response(value))?;
             writeln!(handle)?;
         }
         OutputFormat::Jsonl => {
@@ -244,63 +278,292 @@ pub fn emit(format: &OutputFormat, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
-fn render_jsonl(value: &Value, out: &mut dyn Write) -> io::Result<()> {
-    if value.get("ok").and_then(Value::as_bool) == Some(false) {
-        let event = json!({
-            "schemaVersion": value.get("schemaVersion").cloned().unwrap_or_else(|| json!(SCHEMA_VERSION)),
-            "event": "error",
-            "ok": false,
-            "truncated": value.get("truncated").cloned().unwrap_or_else(|| json!(false)),
-            "nextCursor": value.get("nextCursor").cloned().unwrap_or(Value::Null),
-            "warnings": value.get("warnings").cloned().unwrap_or_else(|| json!([])),
-            "suggestedReads": value.get("suggestedReads").cloned().unwrap_or_else(|| json!([])),
-            "nextActions": value.get("nextActions").cloned().unwrap_or_else(|| json!([])),
-            "error": value.get("error").cloned().unwrap_or_else(|| json!({ "code": "error", "message": "unknown error" }))
-        });
-        serde_json::to_writer(&mut *out, &event)?;
-        writeln!(out)?;
-        return Ok(());
-    }
+fn internal_json_enabled() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CODE_SEARCH_INTERNAL_JSON").is_some()
+}
 
-    let result_count = value
-        .get("results")
-        .and_then(Value::as_array)
-        .map(|results| {
-            for result in results {
-                let event = json!({
-                    "schemaVersion": value.get("schemaVersion").cloned().unwrap_or_else(|| json!(SCHEMA_VERSION)),
-                    "event": "result",
-                    "result": result
-                });
-                serde_json::to_writer(&mut *out, &event)?;
-                writeln!(out)?;
+pub struct ProgressIndicator {
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    active: bool,
+}
+
+impl ProgressIndicator {
+    pub fn start(format: &OutputFormat, message: impl Into<String>) -> Self {
+        if *format != OutputFormat::Text || !io::stderr().is_terminal() {
+            return Self {
+                running: Arc::new(AtomicBool::new(false)),
+                handle: None,
+                active: false,
+            };
+        }
+
+        let message = message.into();
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let handle = thread::spawn(move || {
+            let frames = ["-", "\\", "|", "/"];
+            let mut idx = 0usize;
+            while thread_running.load(Ordering::Relaxed) {
+                let _ = write!(io::stderr(), "\r{} {}", frames[idx % frames.len()], message);
+                let _ = io::stderr().flush();
+                idx = idx.wrapping_add(1);
+                thread::sleep(Duration::from_millis(120));
             }
-            Ok::<usize, io::Error>(results.len())
-        })
-        .transpose()?
-        .unwrap_or(0);
-
-    let mut summary = json!({
-        "schemaVersion": value.get("schemaVersion").cloned().unwrap_or_else(|| json!(SCHEMA_VERSION)),
-        "event": "summary",
-        "ok": true,
-        "command": value.get("command").cloned().unwrap_or(Value::Null),
-        "canonicalCommand": value.get("canonicalCommand").cloned().unwrap_or(Value::Null),
-        "snapshot_id": value.get("snapshot_id").cloned().unwrap_or(Value::Null),
-        "truncated": value.get("truncated").cloned().unwrap_or_else(|| json!(false)),
-        "nextCursor": value.get("nextCursor").cloned().unwrap_or(Value::Null),
-        "resultCount": result_count,
-        "budget": value.get("budget").cloned().unwrap_or(Value::Null),
-        "warnings": value.get("warnings").cloned().unwrap_or_else(|| json!([])),
-        "suggestedReads": value.get("suggestedReads").cloned().unwrap_or_else(|| json!([])),
-        "nextActions": value.get("nextActions").cloned().unwrap_or_else(|| json!([]))
-    });
-    if let Some(summary_value) = value.get("summary") {
-        summary["summary"] = summary_value.clone();
+            let _ = write!(io::stderr(), "\r{}\r", " ".repeat(message.len() + 4));
+            let _ = io::stderr().flush();
+        });
+        Self {
+            running,
+            handle: Some(handle),
+            active: true,
+        }
     }
-    serde_json::to_writer(&mut *out, &summary)?;
+
+    pub fn finish(mut self, message: impl AsRef<str>) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if self.active {
+            let message = message.as_ref();
+            if !message.is_empty() {
+                let _ = writeln!(io::stderr(), "{message}");
+            }
+        }
+    }
+}
+
+fn render_jsonl(value: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let public = public_response(value);
+    if let Some(results) = public.results.as_array() {
+        for result in results {
+            let event = ResultEvent {
+                event: "result",
+                result,
+            };
+            serde_json::to_writer(&mut *out, &event)?;
+            writeln!(out)?;
+        }
+    }
+    let event = PageEvent {
+        event: "page",
+        page: public.page,
+        caveats: public.caveats,
+    };
+    serde_json::to_writer(&mut *out, &event)?;
     writeln!(out)?;
     Ok(())
+}
+
+fn public_response(value: &Value) -> PublicResponse {
+    PublicResponse {
+        results: public_results(value),
+        page: PublicPage {
+            truncated: value
+                .get("truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            next_cursor: value.get("nextCursor").cloned().unwrap_or(Value::Null),
+        },
+        caveats: public_caveats(value),
+    }
+}
+
+pub fn public_response_value(value: &Value) -> Value {
+    serde_json::to_value(public_response(value)).unwrap_or_else(|_| {
+        json!({
+            "results": [],
+            "page": {
+                "truncated": false,
+                "nextCursor": null
+            },
+            "caveats": [
+                {
+                    "code": "serialization_error",
+                    "message": "failed to serialize public response"
+                }
+            ]
+        })
+    })
+}
+
+fn public_results(value: &Value) -> Value {
+    let Some(results) = value.get("results").and_then(Value::as_array) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(results.iter().map(public_result).collect())
+}
+
+fn public_result(result: &Value) -> Value {
+    let Value::Object(object) = result else {
+        return result.clone();
+    };
+    let mut object = object.clone();
+    for field in [
+        "fileHash",
+        "readCommand",
+        "readCommandArgv",
+        "producer",
+        "sourceReason",
+        "indexFresh",
+        "reliability",
+        "exact",
+        "knownBlindSpots",
+        "fallbackReason",
+        "previewTruncatedReason",
+    ] {
+        object.remove(field);
+    }
+    sanitize_public_object(&mut object);
+    Value::Object(object)
+}
+
+fn sanitize_public_object(object: &mut serde_json::Map<String, Value>) {
+    for value in object.values_mut() {
+        sanitize_public_value(value);
+    }
+    object.retain(|key, value| keep_public_field(key, value));
+}
+
+fn sanitize_public_value(value: &mut Value) {
+    match value {
+        Value::Object(object) => sanitize_public_object(object),
+        Value::Array(values) => {
+            for value in values {
+                sanitize_public_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn keep_public_field(key: &str, value: &Value) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    if matches!(key, "context" | "warnings") {
+        return !value.as_array().is_some_and(Vec::is_empty);
+    }
+    if matches!(key, "previewTruncated" | "truncated" | "binary") {
+        return value.as_bool().unwrap_or(true);
+    }
+    if key == "warning" {
+        return value.as_str().is_some_and(|warning| !warning.is_empty());
+    }
+    true
+}
+
+fn public_caveats(value: &Value) -> Vec<Value> {
+    let mut caveats = Vec::new();
+    let mut seen = std::collections::BTreeSet::<String>::new();
+
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        let code = value
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        push_public_caveat(&mut caveats, &mut seen, code, message);
+    }
+
+    for warning in value
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let code = warning
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("warning");
+        let message = warning
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or(code);
+        push_public_caveat(&mut caveats, &mut seen, code, message);
+    }
+
+    if let Some(level) = value.pointer("/reliability/level").and_then(Value::as_str) {
+        match level {
+            "parser_fact" => {
+                if !seen.contains("precise_scip_index_unavailable") {
+                    push_public_caveat(
+                        &mut caveats,
+                        &mut seen,
+                        "parser_fact",
+                        "parser fallback result; not semantic reference resolution",
+                    );
+                }
+            }
+            "inferred_candidate" => push_public_caveat(
+                &mut caveats,
+                &mut seen,
+                "inferred_candidate",
+                "call graph result is an inferred candidate",
+            ),
+            "source_fact" | "precise_fact" | "freshness" => {}
+            other => push_public_caveat(
+                &mut caveats,
+                &mut seen,
+                other,
+                "result reliability is not exact",
+            ),
+        }
+    }
+
+    if value.get("truncated").and_then(Value::as_bool) == Some(true)
+        || results_contain_truncation(value)
+    {
+        push_public_caveat(
+            &mut caveats,
+            &mut seen,
+            "truncated_output",
+            "output was truncated; narrow the query or increase limit/context",
+        );
+    }
+
+    if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
+        let message = value
+            .pointer("/guard/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("broad query guard triggered");
+        push_public_caveat(&mut caveats, &mut seen, "broad_query_guard", message);
+    }
+
+    caveats
+}
+
+fn push_public_caveat(
+    caveats: &mut Vec<Value>,
+    seen: &mut std::collections::BTreeSet<String>,
+    code: &str,
+    message: &str,
+) {
+    if seen.insert(code.to_string()) {
+        caveats.push(json!({ "code": code, "message": message }));
+    }
+}
+
+fn results_contain_truncation(value: &Value) -> bool {
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|result| {
+            result.get("truncated").and_then(Value::as_bool) == Some(true)
+                || result.get("previewTruncated").and_then(Value::as_bool) == Some(true)
+                || result
+                    .get("context")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|line| line.get("truncated").and_then(Value::as_bool) == Some(true))
+        })
 }
 
 fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
@@ -317,8 +580,6 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
         return Ok(());
     }
 
-    render_text_warnings(value, out)?;
-
     if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
         let reason = value
             .pointer("/guard/reason")
@@ -333,7 +594,6 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
             "warning: broad query guard triggered ({reason}); suppressed {suppressed} results"
         )?;
         render_text_summary(value, out)?;
-        render_text_next_action(value, out, "allow_broad")?;
         render_text_results(value, out)?;
         return Ok(());
     }
@@ -344,7 +604,6 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("query");
         writeln!(out, "no matches for {command}")?;
-        render_text_next_action(value, out, "")?;
         return Ok(());
     }
 
@@ -360,29 +619,27 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
         writeln!(out, "ambiguous results: {count} candidates")?;
         render_text_facets(value.pointer("/ambiguity/groups/kind"), out, "kinds")?;
         render_text_facets(value.pointer("/ambiguity/groups/topDir"), out, "top dirs")?;
-        render_text_next_action(value, out, "narrow_scope")?;
     }
 
     render_text_results(value, out)?;
+    render_text_caveats(value, out)?;
     Ok(())
 }
 
 fn render_text_results(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     if let Some(results) = value.get("results").and_then(Value::as_array) {
+        let command = value.get("command").and_then(Value::as_str).unwrap_or("");
+        if matches!(command, "calls" | "callers") {
+            return render_text_graph(value, results, out);
+        }
+        if command == "read" {
+            return render_text_read(results, out);
+        }
+        if is_status_like(command) {
+            return render_text_status_like(command, results, out);
+        }
         for result in results {
-            if let Some(path) = result.get("path").and_then(Value::as_str) {
-                if let Some(range) = result.get("range") {
-                    let line = range
-                        .pointer("/start/line")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(1);
-                    writeln!(out, "{path}:{line}")?;
-                } else {
-                    writeln!(out, "{path}")?;
-                }
-            } else {
-                writeln!(out, "{result}")?;
-            }
+            render_text_result(result, out)?;
         }
         return Ok(());
     }
@@ -391,30 +648,338 @@ fn render_text_results(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
-fn render_text_warnings(value: &Value, out: &mut dyn Write) -> io::Result<()> {
-    for warning in value
-        .get("warnings")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let code = warning
-            .get("code")
+fn render_text_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    if let Some(path) = result.get("path").and_then(Value::as_str) {
+        let location = format_location(path, result.get("range"));
+        if let Some(name) = result
+            .get("name")
+            .or_else(|| result.get("symbolName"))
             .and_then(Value::as_str)
-            .unwrap_or("warning");
-        if matches!(
-            code,
-            "no_match" | "broad_query_guard_triggered" | "ambiguous_results"
-        ) {
+        {
+            let kind = result
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("symbol");
+            writeln!(out, "{kind:<12}{name}")?;
+            writeln!(out, "  {location}")?;
+            return Ok(());
+        }
+        if let Some(preview) = result.get("preview").and_then(Value::as_str) {
+            writeln!(out, "{location}  {}", preview.trim())?;
+            return Ok(());
+        }
+        writeln!(out, "{location}")?;
+        return Ok(());
+    }
+
+    if let Some(path) = result.get("file").and_then(Value::as_str) {
+        writeln!(out, "{path}")?;
+        return Ok(());
+    }
+
+    writeln!(out, "{}", one_line_json(result))?;
+    Ok(())
+}
+
+fn render_text_read(results: &[Value], out: &mut dyn Write) -> io::Result<()> {
+    for (idx, result) in results.iter().enumerate() {
+        if idx > 0 {
+            writeln!(out)?;
+        }
+        let path = result.get("path").and_then(Value::as_str).unwrap_or("read");
+        if result.get("binary").and_then(Value::as_bool) == Some(true) {
+            writeln!(out, "{path}: binary file not displayed")?;
             continue;
         }
-        let message = warning
+        if let Some(content) = result.get("content").and_then(Value::as_str) {
+            write!(out, "{content}")?;
+            if !content.ends_with('\n') {
+                writeln!(out)?;
+            }
+        } else {
+            writeln!(out, "{}", format_location(path, result.get("range")))?;
+        }
+    }
+    Ok(())
+}
+
+fn render_text_graph(value: &Value, results: &[Value], out: &mut dyn Write) -> io::Result<()> {
+    let command = value
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("calls");
+    let identifier = value
+        .pointer("/query/identifier")
+        .and_then(Value::as_str)
+        .unwrap_or("symbol");
+    let title = if command == "callers" {
+        format!("Callers of \"{identifier}\" ({})", results.len())
+    } else {
+        format!("Callees of \"{identifier}\" ({})", results.len())
+    };
+    writeln!(out, "{title}")?;
+    if results.is_empty() {
+        return Ok(());
+    }
+    writeln!(out)?;
+    for result in results {
+        let caller = result
+            .get("enclosingSymbol")
+            .and_then(Value::as_str)
+            .map(display_symbol)
+            .unwrap_or_else(|| identifier.to_string());
+        let callee = result
+            .get("target")
+            .and_then(Value::as_str)
+            .map(display_symbol)
+            .unwrap_or_else(|| identifier.to_string());
+        let path = result.get("path").and_then(Value::as_str).unwrap_or("");
+        let location = if path.is_empty() {
+            String::new()
+        } else {
+            format_location(path, result.get("range"))
+        };
+        if location.is_empty() {
+            writeln!(out, "{caller} -> {callee}")?;
+        } else {
+            writeln!(out, "{caller} -> {callee}")?;
+            writeln!(out, "  {location}")?;
+        }
+    }
+    Ok(())
+}
+
+fn render_text_status_like(
+    command: &str,
+    results: &[Value],
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    for result in results {
+        match command {
+            "status" => {
+                let root = result.get("root").and_then(Value::as_str).unwrap_or("");
+                if !root.is_empty() {
+                    writeln!(out, "Workspace: {root}")?;
+                }
+                if let Some(head) = result.get("head").and_then(Value::as_str) {
+                    writeln!(out, "Head: {head}")?;
+                }
+                let dirty = result
+                    .get("dirty")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let staged = result
+                    .get("stagedCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let worktree = result
+                    .get("worktreeCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                writeln!(out, "Dirty: {dirty} (staged {staged}, worktree {worktree})")?;
+            }
+            "index status" | "index verify" => render_index_status_result(result, out)?,
+            "index build" | "index update" => render_index_build_result(result, out)?,
+            "index import-scip" => render_index_import_result(result, out)?,
+            "index pack" => render_index_pack_result(result, out)?,
+            "index unpack" => render_index_unpack_result(result, out)?,
+            "index clean" => render_index_clean_result(result, out)?,
+            _ => writeln!(out, "{}", one_line_json(result))?,
+        }
+    }
+    Ok(())
+}
+
+fn render_index_status_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let exists = result.get("exists").and_then(Value::as_bool);
+    let fresh = result.get("fresh").and_then(Value::as_bool);
+    if let Some(exists) = exists {
+        writeln!(out, "Index exists: {exists}")?;
+    }
+    if let Some(fresh) = fresh {
+        writeln!(out, "Index fresh: {fresh}")?;
+    }
+    if let Some(path) = result.get("path").and_then(Value::as_str) {
+        writeln!(out, "Path: {path}")?;
+    }
+    if let Some(file_count) = result
+        .pointer("/manifest/fileCount")
+        .and_then(Value::as_u64)
+    {
+        writeln!(out, "Files: {file_count}")?;
+    }
+    if let Some(reason) = result.get("reason").and_then(Value::as_str) {
+        writeln!(out, "Reason: {reason}")?;
+    }
+    Ok(())
+}
+
+fn render_index_build_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let index = result.get("index").unwrap_or(result);
+    if result.get("updated").and_then(Value::as_bool) == Some(false) {
+        writeln!(out, "Index already fresh")?;
+    }
+    if let Some(file_count) = index.get("fileCount").and_then(Value::as_u64) {
+        writeln!(out, "Indexed {file_count} files")?;
+    }
+    if let Some(storage) = index.get("storageBackend").and_then(Value::as_str) {
+        writeln!(out, "Backend: {storage}")?;
+    }
+    if let Some(path) = index.get("path").and_then(Value::as_str) {
+        writeln!(out, "Path: {path}")?;
+    }
+    if index.get("fileCount").is_none() {
+        writeln!(out, "{}", one_line_json(result))?;
+    }
+    Ok(())
+}
+
+fn render_index_import_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let index = result.get("index").unwrap_or(result);
+    let record_count = index
+        .get("recordCount")
+        .or_else(|| index.get("definitionCount"))
+        .and_then(Value::as_u64);
+    if let Some(record_count) = record_count {
+        writeln!(out, "Imported {record_count} SCIP records")?;
+    } else {
+        writeln!(out, "Imported SCIP index")?;
+    }
+    if let Some(source) = index.get("source").and_then(Value::as_str) {
+        writeln!(out, "Source: {source}")?;
+    }
+    if let Some(path) = index.get("path").and_then(Value::as_str) {
+        writeln!(out, "Path: {path}")?;
+    }
+    Ok(())
+}
+
+fn render_index_pack_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let output_path = result
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or("archive");
+    let entry_count = result
+        .get("entryCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let archive_size = result
+        .get("archiveSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    writeln!(out, "Packed index to {output_path}")?;
+    if entry_count > 0 || archive_size > 0 {
+        writeln!(out, "Entries: {entry_count}, bytes: {archive_size}")?;
+    }
+    Ok(())
+}
+
+fn render_index_unpack_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    if let Some(snapshot_id) = result.get("remote_snapshot_id").and_then(Value::as_str) {
+        writeln!(out, "Unpacked remote snapshot {snapshot_id}")?;
+    } else {
+        writeln!(out, "Unpacked remote snapshot")?;
+    }
+    if let Some(remote_dir) = result.get("remoteDir").and_then(Value::as_str) {
+        writeln!(out, "Path: {remote_dir}")?;
+    }
+    if let Some(entry_count) = result.get("entryCount").and_then(Value::as_u64) {
+        writeln!(out, "Entries: {entry_count}")?;
+    }
+    Ok(())
+}
+
+fn render_index_clean_result(result: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let cleaned = result
+        .get("cleaned")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    writeln!(out, "Index cleaned: {cleaned}")?;
+    if let Some(path) = result.get("path").and_then(Value::as_str) {
+        writeln!(out, "Path: {path}")?;
+    }
+    Ok(())
+}
+
+fn is_status_like(command: &str) -> bool {
+    matches!(
+        command,
+        "status"
+            | "index status"
+            | "index verify"
+            | "index build"
+            | "index update"
+            | "index import-scip"
+            | "index pack"
+            | "index unpack"
+            | "index clean"
+    )
+}
+
+fn render_text_caveats(value: &Value, out: &mut dyn Write) -> io::Result<()> {
+    let caveats = public_caveats(value);
+    let filtered = caveats
+        .iter()
+        .filter(|caveat| {
+            !matches!(
+                caveat.get("code").and_then(Value::as_str),
+                Some("no_match" | "broad_query_guard_triggered")
+            )
+        })
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        return Ok(());
+    }
+    writeln!(out)?;
+    for caveat in filtered {
+        let code = caveat
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("caveat");
+        let message = caveat
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or(code);
-        writeln!(out, "warning: {code}: {message}")?;
+        writeln!(out, "caveat: {code}: {message}")?;
     }
     Ok(())
+}
+
+fn format_location(path: &str, range: Option<&Value>) -> String {
+    let Some(range) = range else {
+        return path.to_string();
+    };
+    let start = range
+        .pointer("/start/line")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let end = range
+        .pointer("/end/line")
+        .and_then(Value::as_u64)
+        .unwrap_or(start);
+    if start == end {
+        format!("{path}:{start}")
+    } else {
+        format!("{path}:{start}-{end}")
+    }
+}
+
+fn display_symbol(symbol: &str) -> String {
+    let symbol = symbol.trim();
+    if symbol.contains("::") {
+        return symbol.to_string();
+    }
+    symbol
+        .rsplit(['.', '/', '#'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(symbol)
+        .trim_start_matches("function")
+        .trim_start_matches('-')
+        .to_string()
+}
+
+fn one_line_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn render_text_summary(value: &Value, out: &mut dyn Write) -> io::Result<()> {
@@ -455,48 +1020,6 @@ fn render_text_facets(facets: Option<&Value>, out: &mut dyn Write, label: &str) 
         .collect::<Vec<_>>();
     if !rendered.is_empty() {
         writeln!(out, "  {label}: {}", rendered.join(", "))?;
-    }
-    Ok(())
-}
-
-fn render_text_next_action(
-    value: &Value,
-    out: &mut dyn Write,
-    preferred_kind: &str,
-) -> io::Result<()> {
-    let mut actions = Vec::new();
-    actions.extend(
-        value
-            .get("nextActions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten(),
-    );
-    actions.extend(
-        value
-            .pointer("/guard/nextActions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten(),
-    );
-    if actions.is_empty() {
-        return Ok(());
-    }
-    let action = actions
-        .iter()
-        .copied()
-        .find(|action| {
-            !preferred_kind.is_empty()
-                && action.get("kind").and_then(Value::as_str) == Some(preferred_kind)
-        })
-        .or_else(|| actions.first().copied());
-    let Some(action) = action else {
-        return Ok(());
-    };
-    if let Some(command) = action.get("command").and_then(Value::as_str) {
-        writeln!(out, "try: {command}")?;
-    } else if let Some(reason) = action.get("reason").and_then(Value::as_str) {
-        writeln!(out, "next: {reason}")?;
     }
     Ok(())
 }
@@ -999,24 +1522,6 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn compact_value(value: &Value) -> Value {
-    let mut value = value.clone();
-    if let Some(results) = value.get_mut("results").and_then(Value::as_array_mut) {
-        for result in results {
-            compact_result(result);
-        }
-    }
-    value
-}
-
-fn compact_result(value: &mut Value) {
-    if let Value::Object(object) = value {
-        for field in ["preview", "context", "content", "matchText"] {
-            object.remove(field);
-        }
-    }
 }
 
 fn structured_warnings(warnings: Vec<String>) -> Value {

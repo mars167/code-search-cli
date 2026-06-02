@@ -6,6 +6,15 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 fn code_search() -> Command {
+    let mut command = raw_code_search();
+    command
+        .env("CODE_SEARCH_INTERNAL_JSON", "1")
+        .arg("--output")
+        .arg("json");
+    command
+}
+
+fn raw_code_search() -> Command {
     Command::cargo_bin("code-search").expect("binary exists")
 }
 
@@ -142,6 +151,41 @@ fn warnings_are_structured_with_stable_codes() {
         .as_str()
         .unwrap()
         .contains("precise occurrence index"));
+}
+
+#[test]
+fn public_json_keeps_only_results_page_and_caveats() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "before\nneedle\nafter\n").unwrap();
+
+    let output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json", "--context", "1", "find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let keys = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec!["caveats", "page", "results"]);
+    assert!(json["page"]["nextCursor"].is_null());
+    assert_eq!(json["page"]["truncated"], false);
+    assert!(json["caveats"].as_array().unwrap().is_empty());
+
+    let result = &json["results"][0];
+    assert_eq!(result["path"], "sample.txt");
+    assert!(result.get("readCommand").is_none());
+    assert!(result.get("readCommandArgv").is_none());
+    assert!(result.get("producer").is_none());
+    assert!(result["context"][0].get("truncated").is_none());
+    assert!(result["context"][0].get("truncatedReason").is_none());
 }
 
 #[test]
@@ -1219,7 +1263,7 @@ fn jsonl_summary_includes_cursor_and_facets() {
     fs::write(dir.path().join("a.rs"), "needle\n").unwrap();
     fs::write(dir.path().join("b.rs"), "needle\n").unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1235,14 +1279,9 @@ fn jsonl_summary_includes_cursor_and_facets() {
     let lines = String::from_utf8(output).unwrap();
     let summary: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
 
-    assert_eq!(summary["event"], "summary");
-    assert_eq!(summary["truncated"], true);
-    assert!(summary["nextCursor"].as_str().is_some());
-    assert!(summary["summary"]["facets"]["language"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|facet| facet["value"] == "rust" && facet["count"] == 2));
+    assert_eq!(summary["event"], "page");
+    assert_eq!(summary["page"]["truncated"], true);
+    assert!(summary["page"]["nextCursor"].as_str().is_some());
 }
 
 #[test]
@@ -1554,7 +1593,7 @@ fn text_output_reports_broad_guard_warning() {
         fs::write(dir.path().join(format!("file{idx}.txt")), "anything\n").unwrap();
     }
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1580,11 +1619,9 @@ fn text_output_regular_search_stays_path_line_focused() {
     )
     .unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
-        .arg("--output")
-        .arg("text")
         .args(["find", "needle"])
         .assert()
         .success()
@@ -1593,7 +1630,7 @@ fn text_output_regular_search_stays_path_line_focused() {
         .clone();
     let text = String::from_utf8(output).unwrap();
 
-    assert_eq!(text.trim(), "src/main.rs:2");
+    assert_eq!(text.trim(), "src/main.rs:2  let needle = 1;");
 }
 
 #[test]
@@ -1601,7 +1638,7 @@ fn text_output_no_match_shows_hint_and_exit_code_two() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1615,8 +1652,7 @@ fn text_output_no_match_shows_hint_and_exit_code_two() {
     let text = String::from_utf8(output).unwrap();
 
     assert!(text.contains("no matches for find"));
-    assert!(text.contains("try: code-search --path"));
-    assert!(text.contains("grep MissingThing"));
+    assert!(!text.contains("try:"));
 }
 
 #[test]
@@ -1631,7 +1667,7 @@ fn text_output_broad_query_shows_summary_facets_and_next_action() {
         .unwrap();
     }
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1647,7 +1683,7 @@ fn text_output_broad_query_shows_summary_facets_and_next_action() {
     assert!(text.contains("summary:"));
     assert!(text.contains("estimated matches: 8"));
     assert!(text.contains("top languages: java=8"));
-    assert!(text.contains("next: rerun with --allow-broad"));
+    assert!(!text.contains("next:"));
 }
 
 #[test]
@@ -1656,7 +1692,7 @@ fn text_output_fallback_warning_is_visible() {
     fs::create_dir_all(dir.path().join("src")).unwrap();
     fs::write(dir.path().join("src/lib.rs"), "fn helper() {}\n").unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1669,7 +1705,7 @@ fn text_output_fallback_warning_is_visible() {
         .clone();
     let text = String::from_utf8(output).unwrap();
 
-    assert!(text.contains("warning: precise_scip_index_unavailable"));
+    assert!(text.contains("caveat: precise_scip_index_unavailable"));
     assert!(text.contains("src/lib.rs:1"));
 }
 
@@ -1678,7 +1714,7 @@ fn text_output_error_is_single_readable_line() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .arg("--output")
@@ -1697,7 +1733,7 @@ fn text_output_error_is_single_readable_line() {
 
 #[test]
 fn text_output_parse_error_is_single_readable_line() {
-    let output = code_search()
+    let output = raw_code_search()
         .args(["--output", "text", "--definitely-not-an-option"])
         .assert()
         .failure()
@@ -1925,7 +1961,7 @@ fn error_envelopes_keep_stable_output_fields() {
 
 #[test]
 fn jsonl_parse_errors_are_error_events() {
-    let output = code_search()
+    let output = raw_code_search()
         .args(["--output", "jsonl", "definitely-not-a-command"])
         .assert()
         .failure()
@@ -1939,11 +1975,10 @@ fn jsonl_parse_errors_are_error_events() {
         .collect();
 
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["event"], "error");
-    assert_eq!(lines[0]["error"]["code"], "cli_usage_error");
-    assert_eq!(lines[0]["truncated"], false);
-    assert!(lines[0]["nextCursor"].is_null());
-    assert!(lines[0]["warnings"].as_array().unwrap().is_empty());
+    assert_eq!(lines[0]["event"], "page");
+    assert_eq!(lines[0]["caveats"][0]["code"], "cli_usage_error");
+    assert_eq!(lines[0]["page"]["truncated"], false);
+    assert!(lines[0]["page"]["nextCursor"].is_null());
 }
 
 #[test]
@@ -1956,7 +1991,7 @@ fn compact_json_omits_large_fields_but_keeps_read_command() {
     )
     .unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .args([
@@ -1974,10 +2009,10 @@ fn compact_json_omits_large_fields_but_keeps_read_command() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
 
-    assert_eq!(json["results"][0]["readCommandArgv"][4], "src/main.rs:2");
-    assert!(json["results"][0].get("preview").is_none());
-    assert!(json["results"][0].get("context").is_none());
-    assert!(json["results"][0].get("matchText").is_none());
+    assert_eq!(json["results"][0]["path"], "src/main.rs");
+    assert!(json["results"][0].get("readCommand").is_none());
+    assert!(json["results"][0].get("readCommandArgv").is_none());
+    assert!(json.get("schemaVersion").is_none());
 }
 
 #[test]
@@ -1985,7 +2020,7 @@ fn jsonl_output_streams_result_events_and_summary() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("sample.txt"), "needle one\nneedle two\n").unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .args(["--output", "jsonl", "find", "needle"])
@@ -2001,10 +2036,10 @@ fn jsonl_output_streams_result_events_and_summary() {
         .collect();
 
     assert_eq!(lines[0]["event"], "result");
-    assert_eq!(lines[0]["result"]["readCommandArgv"][4], "sample.txt:1");
-    assert_eq!(lines[2]["event"], "summary");
-    assert_eq!(lines[2]["resultCount"], 2);
-    assert_eq!(lines[2]["schemaVersion"], "1.0");
+    assert_eq!(lines[0]["result"]["path"], "sample.txt");
+    assert_eq!(lines[2]["event"], "page");
+    assert_eq!(lines[2]["page"]["truncated"], false);
+    assert!(lines[2].get("schemaVersion").is_none());
 }
 
 #[test]
@@ -2323,7 +2358,7 @@ fn jsonl_summary_includes_large_content_summary_counts() {
     let long_line = format!("prefix needle {}\n", "x".repeat(2000));
     fs::write(dir.path().join("long.txt"), long_line).unwrap();
 
-    let output = code_search()
+    let output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
         .args(["--output", "jsonl", "--context", "1", "find", "needle"])
@@ -2338,9 +2373,12 @@ fn jsonl_summary_includes_large_content_summary_counts() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     let summary = lines.last().unwrap();
-    assert_eq!(summary["event"], "summary");
-    assert_eq!(summary["summary"]["truncatedCount"], 1);
-    assert!(summary["summary"]["skippedCount"].as_u64().is_some());
+    assert_eq!(summary["event"], "page");
+    assert!(summary["caveats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|caveat| caveat["code"] == "truncated_output"));
 }
 
 #[test]
@@ -3896,9 +3934,10 @@ fn mcp_stdio_find_matches_cli_core_json_and_read_flow() {
     )
     .unwrap();
 
-    let cli_output = code_search()
+    let cli_output = raw_code_search()
         .arg("--path")
         .arg(dir.path())
+        .args(["--output", "json"])
         .args(["find", "needle"])
         .assert()
         .success()
@@ -3930,16 +3969,11 @@ fn mcp_stdio_find_matches_cli_core_json_and_read_flow() {
     let first_line: Value = serde_json::from_str(first_stdout.lines().next().unwrap()).unwrap();
     let first_find: Value =
         serde_json::from_str(first_line["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let read_target = first_find["nextActions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|action| action["kind"] == "read")
-        .and_then(|action| action["argv"].as_array())
-        .and_then(|argv| argv.last())
-        .and_then(Value::as_str)
-        .unwrap()
-        .to_string();
+    let read_path = first_find["results"][0]["path"].as_str().unwrap();
+    let read_line = first_find["results"][0]["range"]["start"]["line"]
+        .as_u64()
+        .unwrap();
+    let read_target = format!("{read_path}:{read_line}");
     let read_request = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -3968,9 +4002,8 @@ fn mcp_stdio_find_matches_cli_core_json_and_read_flow() {
 
     let mcp_find: Value =
         serde_json::from_str(lines[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(mcp_find["command"], cli_json["command"]);
-    assert_eq!(mcp_find["canonicalCommand"], cli_json["canonicalCommand"]);
-    assert_eq!(mcp_find["query"], cli_json["query"]);
+    assert!(mcp_find.get("command").is_none());
+    assert!(mcp_find.get("query").is_none());
     assert_eq!(
         mcp_find["results"][0]["path"],
         cli_json["results"][0]["path"]
@@ -3979,15 +4012,11 @@ fn mcp_stdio_find_matches_cli_core_json_and_read_flow() {
         mcp_find["results"][0]["range"],
         cli_json["results"][0]["range"]
     );
-    assert!(mcp_find["nextActions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|action| action["kind"] == "read"));
+    assert!(mcp_find["results"][0].get("readCommandArgv").is_none());
 
     let mcp_read: Value =
         serde_json::from_str(lines[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(mcp_read["command"], "read");
+    assert!(mcp_read.get("command").is_none());
     assert!(mcp_read["results"][0]["content"]
         .as_str()
         .unwrap()

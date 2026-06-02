@@ -33,61 +33,48 @@ flowchart TB
 | 索引 | `index ...`, `hooks ...` | 维护 freshness 和本地/remote 缓存 |
 | 集成接口 | `mcp`, `serve`, `watch` | 包装同一套 query service 和 watcher 状态 |
 
-## JSON 响应形态
+## 输出契约
+
+默认输出是短文本，面向真实终端阅读。需要机器读取时显式传 `--output json` 或 `--output jsonl`。
+MCP tool result 的 `content[0].text` 使用同一 public JSON 投影。
+
+公开 JSON 只保留三类信息：
 
 ```json
 {
-  "schemaVersion": "1.0",
-  "ok": true,
-  "command": "grep",
-  "canonicalCommand": "find",
-  "query": {
-    "pattern": "fn .*status",
-    "mode": "regex",
-    "normalized": true
-  },
-  "snapshot_id": "worktree:...",
-  "reliability": {
-    "level": "source_fact",
-    "source": "text_path_git_filesystem",
-    "exact": true,
-    "llmInstruction": "修改前仍应使用 code-search read 读取精确范围。"
-  },
-  "index": {
-    "used": true,
-    "fresh": true,
-    "fallback": false
-  },
-  "budget": {
-    "tier": "small",
-    "maxResults": 100,
-    "maxPreviewChars": 240,
-    "maxContextLines": 0,
-    "reason": "small_workspace_low_hits"
-  },
   "results": [],
-  "suggestedReads": [],
-  "nextActions": [],
-  "warnings": []
+  "page": {
+    "truncated": false,
+    "nextCursor": null
+  },
+  "caveats": []
 }
 ```
 
 稳定字段：
 
-- `command` 保留用户调用的入口名。
-- `canonicalCommand` 表示归一化后的能力名。
-- `schemaVersion` 使用兼容版本号；同一 major 内只新增可选字段或扩展枚举值，不移除既有稳定字段。
-- `query.normalized=true` 表示命令参数已按 CLI 契约归一化，便于重放与调试。
-- `snapshot_id` 表示结果绑定的 Git/worktree 视角。
-- `reliability` 告诉调用方是否能把结果当作事实。
-- `index` 只描述缓存是否参与和是否新鲜。
-- `budget` 描述本次输出预算：`tier` 按仓库规模/命中量分为 `small`、`medium`、`large`，并暴露 `maxResults`、`maxPreviewChars`、`maxContextLines` 和 `reason`。宽查询 guard 仍是硬保护；budget 是常规输出压缩策略。
-- `suggestedReads` 和每条结果上的 `readCommand` 是进入编辑前的优先验证路径。
-- `nextActions` 暴露可执行的收窄、翻页、重放或 broad-query 处理建议。
-- `savedQuery` 只在保存、重放或管理 saved query 时出现，包含 name、path、command、snapshotId、currentSnapshotId、snapshotMatch、requestCursor 和 nextCursor 等元数据。
-- `noMatch` 只出现在搜索/导航类命令的空结果响应中，说明空结果原因、实际 scope、index 使用状态，并配套可执行 `nextActions`。空结果不代表符号或文本不存在。
-- `ambiguity` 只出现在同名符号候选过多的响应中，按语言、kind、路径等维度分组，并通过 `nextActions` 给出收窄命令。
-- `warnings` 必须暴露 fallback、stale、remote mismatch 或 heuristic 边界；每条 warning 使用 `{code,message}` 结构，`code` 稳定、可匹配。
+- `results` 是唯一的主要结果载体。每条结果只保留定位、文本、符号、关系或命令结果本身需要的字段；内部审计字段、producer、read command、index freshness 和 agent next action 不进入公开 JSON。
+- `page.truncated` 表示本次输出被裁切或分页，调用方应缩小查询、降低 context 或使用 `page.nextCursor` 翻页。
+- `page.nextCursor` 是下一页游标；没有下一页时为 `null`。
+- `caveats` 是机器可匹配的边界说明，结构为 `{code,message}`。无匹配、fallback、候选图关系、宽查询保护、输出裁切和错误都通过 caveats 表示。
+
+`--output compact-json` 是兼容别名，输出同一公开 JSON 形态。
+
+`--output jsonl` 使用逐行事件：
+
+```json
+{"event":"result","result":{}}
+{"event":"page","page":{"truncated":false,"nextCursor":null},"caveats":[]}
+```
+
+错误不会恢复旧 envelope；JSON 输出为 `results: []` 加错误 caveat，JSONL 输出一个 `page` event 加错误 caveat。
+
+## 输出预算与上下文
+
+- `--context` 控制结果上下文；默认 `0`，不会输出 context block。
+- preview、context 和结果数量受输出预算保护；当任何层级被裁切时，`page.truncated=true` 或 `caveats` 包含 `truncated_output`。
+- 宽查询 guard 仍会返回少量样本和 caveat，避免终端与机器输出被大结果集淹没。
+- `read` 仍是编辑前验证入口；公开 JSON 不再内嵌 `readCommand`，调用方应使用结果里的 `path` 和 `range` 组合读取目标。
 
 ## 可靠性流转
 
@@ -108,7 +95,7 @@ flowchart LR
 - `parser_fact` 可以是确定性语法事实，但不能代表 precise semantic reference resolution。
 - `calls` 和 `callers` 即使来自图索引，也必须标为候选。
 - remote 结果必须声明是否与本地文件 proof 对齐；`remote_verified` 仍是共享缓存结果，关键编辑前仍要 `read`。
-- 自动化工具或开发者修改代码前应对关键结果执行 `read <file[:range]>`。
+- 公开输出通过 caveats 暴露这些边界；自动化工具或开发者修改代码前应对关键结果执行 `read <file[:range]>`。
 
 ## Saved Query Replay
 
@@ -117,20 +104,20 @@ flowchart LR
 规则：
 
 - `--save-query <name>` 写入 `.code-search/queries/<name>.json`；name 只允许 ASCII 字母、数字、`.`、`_` 和 `-`。
-- saved query 保存 command、canonicalCommand、query、scope、snapshotId、requestCursor 和 nextCursor；不会保存结果正文。
-- `query replay <name>` 默认使用当前 workspace。snapshot 不匹配时会丢弃 saved cursor，按当前 scope 重跑并返回 `saved_query_snapshot_mismatch` warning。
+- saved query 保存 command、canonicalCommand、query、scope、snapshotId、requestCursor 和 nextCursor；不会保存结果正文，也不会改变公开输出形态。
+- `query replay <name>` 默认使用当前 workspace。snapshot 不匹配时会丢弃 saved cursor，按当前 scope 重跑并返回 `saved_query_snapshot_mismatch` caveat。
 - `query replay <name> --snapshot saved` 要求当前 snapshot 与保存时一致；不一致时返回错误。
-- `query show/list/delete` 是对本地 `.code-search/queries/` 的文件系统操作，返回 `source_fact` 或错误 envelope。
+- `query show/list/delete` 是对本地 `.code-search/queries/` 的文件系统操作，结果仍放在 `results`。
 
 ## Text 输出
 
-`--output json` 是默认自动化契约，保留完整字段、preview/context、`suggestedReads` 和 `nextActions`。
+默认 text 输出保持短、可审计、不过度设计：
 
-`--output compact-json` 保留同一 envelope 与可验证字段，但移除 `preview`、`context`、`content`、`matchText` 这类大字段；调用方仍应通过 `readCommand` 精确读取源码。
-
-`--output jsonl` 面向长结果流式消费：每条命中输出一个 `result` event，最后输出一个 `summary` event；错误输出 `error` event。
-
-`--output text` 只面向人类快速查看，不建议作为自动化集成格式。
+- 搜索结果按 `path:line  preview` 渲染。
+- `read` 直接输出文件内容。
+- `calls`/`callers` 按 caller -> callee 关系渲染，并附带位置。
+- `index build/update/import-scip/pack/unpack` 在 TTY 上显示加载进度；非 TTY 保持无 spinner，避免污染脚本输出。
+- caveats 以短行展示，避免把内部审计、agent next action 或完整 schema 打到终端。
 
 ## 退出码
 

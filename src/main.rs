@@ -43,13 +43,13 @@ fn requested_output_format(args: impl IntoIterator<Item = String>) -> OutputForm
             return args
                 .next()
                 .and_then(|value| output_format_from_str(&value))
-                .unwrap_or(OutputFormat::Json);
+                .unwrap_or(OutputFormat::Text);
         }
         if let Some(value) = arg.strip_prefix("--output=") {
-            return output_format_from_str(value).unwrap_or(OutputFormat::Json);
+            return output_format_from_str(value).unwrap_or(OutputFormat::Text);
         }
     }
-    OutputFormat::Json
+    OutputFormat::Text
 }
 
 fn output_format_from_str(value: &str) -> Option<OutputFormat> {
