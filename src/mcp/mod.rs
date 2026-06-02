@@ -1109,8 +1109,8 @@ mod tests {
 
         let found = call_tool_json(&server, "code_search_find", json!({ "text": "public" }));
         assert!(found["results"].as_array().unwrap().len() <= 5);
-        assert!(has_caveat(&found, "broad_query_guard_triggered"));
         assert!(has_caveat(&found, "broad_query_guard"));
+        assert_eq!(found["caveats"].as_array().unwrap().len(), 1);
     }
 
     // ------------------------------------------------------------------
