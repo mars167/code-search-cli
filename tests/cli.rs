@@ -215,6 +215,50 @@ fn public_json_keeps_only_results_page_and_caveats() {
 }
 
 #[test]
+fn public_json_uses_cursor_without_truncated_caveat_for_limited_pages() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    for path in ["src/a.rs", "src/b.rs", "src/c.rs"] {
+        fs::write(dir.path().join(path), "needle\n").unwrap();
+    }
+
+    let first_output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json", "--limit", "1", "find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first_output).unwrap();
+    let cursor = first["page"]["nextCursor"].as_str().unwrap().to_string();
+
+    assert_eq!(first["results"].as_array().unwrap().len(), 1);
+    assert_eq!(first["page"]["truncated"], false);
+    assert!(first["caveats"].as_array().unwrap().is_empty());
+
+    let second_output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json", "--limit", "1", "--cursor"])
+        .arg(cursor)
+        .args(["find", "needle"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second: Value = serde_json::from_slice(&second_output).unwrap();
+
+    assert_eq!(second["results"].as_array().unwrap().len(), 1);
+    assert_eq!(second["page"]["truncated"], false);
+    assert!(second["page"]["nextCursor"].as_str().is_some());
+    assert!(second["caveats"].as_array().unwrap().is_empty());
+    assert_ne!(first["results"][0]["path"], second["results"][0]["path"]);
+}
+
+#[test]
 fn l0_literal_and_regex_modes_are_predictable() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -1306,7 +1350,7 @@ fn jsonl_summary_includes_cursor_and_facets() {
     let summary: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
 
     assert_eq!(summary["event"], "page");
-    assert_eq!(summary["page"]["truncated"], true);
+    assert_eq!(summary["page"]["truncated"], false);
     assert!(summary["page"]["nextCursor"].as_str().is_some());
 }
 
@@ -1531,6 +1575,43 @@ fn broad_files_star_returns_summary_samples() {
 }
 
 #[test]
+fn public_broad_guard_reports_one_explanatory_caveat() {
+    let dir = tempdir().unwrap();
+    for idx in 0..8 {
+        fs::write(
+            dir.path().join(format!("file{idx}.java")),
+            "public class Sample {}\n",
+        )
+        .unwrap();
+    }
+
+    let output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json", "find", "public"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let caveats = json["caveats"].as_array().unwrap();
+
+    assert_eq!(caveats.len(), 1);
+    assert_eq!(caveats[0]["code"], "broad_query_guard");
+    assert!(caveats[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("broad_literal_pattern"));
+    assert!(caveats[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--allow-broad"));
+    assert_eq!(json["page"]["truncated"], true);
+    assert!(json["page"]["nextCursor"].is_null());
+}
+
+#[test]
 fn allow_broad_expands_with_limit_and_cursor() {
     let dir = tempdir().unwrap();
     for idx in 0..3 {
@@ -1555,6 +1636,38 @@ fn allow_broad_expands_with_limit_and_cursor() {
     assert_eq!(json["results"].as_array().unwrap().len(), 2);
     assert_eq!(json["truncated"], true);
     assert!(json["nextCursor"].as_str().is_some());
+}
+
+#[test]
+fn public_allow_broad_limited_page_uses_cursor_without_truncated_caveat() {
+    let dir = tempdir().unwrap();
+    for idx in 0..6 {
+        fs::write(dir.path().join(format!("file{idx}.txt")), "content\n").unwrap();
+    }
+
+    let output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args([
+            "--output",
+            "json",
+            "--allow-broad",
+            "--limit",
+            "2",
+            "files",
+            "*",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["results"].as_array().unwrap().len(), 2);
+    assert_eq!(json["page"]["truncated"], false);
+    assert!(json["page"]["nextCursor"].as_str().is_some());
+    assert!(json["caveats"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -3923,6 +4036,30 @@ fn serve_no_watch_returns_service_status() {
     assert_eq!(service["mode"], "cli_query_service");
     assert!(service["root"].is_string());
     assert!(service["snapshot"].is_string());
+    assert!(json["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn public_serve_no_watch_returns_note_without_caveat() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "hello\n").unwrap();
+
+    let output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json", "serve", "--no-watch"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert!(json["caveats"].as_array().unwrap().is_empty());
+    assert!(json["results"][0]["service"]["note"]
+        .as_str()
+        .unwrap()
+        .contains("HTTP/MCP adapters"));
 }
 
 #[test]

@@ -378,10 +378,7 @@ fn public_response(value: &Value) -> PublicResponse {
     PublicResponse {
         results: public_results(value),
         page: PublicPage {
-            truncated: value
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            truncated: public_page_truncated(value),
             next_cursor: value.get("nextCursor").cloned().unwrap_or(Value::Null),
         },
         caveats: public_caveats(value),
@@ -488,6 +485,8 @@ fn public_caveats(value: &Value) -> Vec<Value> {
         push_public_caveat(&mut caveats, &mut seen, code, message);
     }
 
+    let guard_triggered = value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true);
+
     for warning in value
         .get("warnings")
         .and_then(Value::as_array)
@@ -502,6 +501,9 @@ fn public_caveats(value: &Value) -> Vec<Value> {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or(code);
+        if guard_triggered && code == "broad_query_guard_triggered" {
+            continue;
+        }
         push_public_caveat(&mut caveats, &mut seen, code, message);
     }
 
@@ -533,9 +535,7 @@ fn public_caveats(value: &Value) -> Vec<Value> {
         }
     }
 
-    if value.get("truncated").and_then(Value::as_bool) == Some(true)
-        || results_contain_truncation(value)
-    {
+    if public_output_truncated(value) {
         push_public_caveat(
             &mut caveats,
             &mut seen,
@@ -544,12 +544,9 @@ fn public_caveats(value: &Value) -> Vec<Value> {
         );
     }
 
-    if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
-        let message = value
-            .pointer("/guard/reason")
-            .and_then(Value::as_str)
-            .unwrap_or("broad query guard triggered");
-        push_public_caveat(&mut caveats, &mut seen, "broad_query_guard", message);
+    if guard_triggered {
+        let message = broad_guard_public_message(value);
+        push_public_caveat(&mut caveats, &mut seen, "broad_query_guard", &message);
     }
 
     caveats
@@ -582,6 +579,51 @@ fn results_contain_truncation(value: &Value) -> bool {
                     .flatten()
                     .any(|line| line.get("truncated").and_then(Value::as_bool) == Some(true))
         })
+}
+
+fn public_page_truncated(value: &Value) -> bool {
+    if public_output_truncated(value) {
+        return true;
+    }
+    if value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true) {
+        return value
+            .pointer("/guard/suppressedResults")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0;
+    }
+    false
+}
+
+fn public_output_truncated(value: &Value) -> bool {
+    if results_contain_truncation(value) {
+        return true;
+    }
+    let has_next_cursor = value.get("nextCursor").and_then(Value::as_str).is_some();
+    let guard_triggered = value.pointer("/guard/triggered").and_then(Value::as_bool) == Some(true);
+    value.get("truncated").and_then(Value::as_bool) == Some(true)
+        && !has_next_cursor
+        && !guard_triggered
+}
+
+fn broad_guard_public_message(value: &Value) -> String {
+    let reason = value
+        .pointer("/guard/reason")
+        .and_then(Value::as_str)
+        .unwrap_or("broad_query");
+    let suppressed = value
+        .pointer("/guard/suppressedResults")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if suppressed > 0 {
+        format!(
+            "broad query guard triggered: {reason}; showing sample results and suppressing {suppressed}; narrow the query or rerun with --allow-broad and an explicit --limit"
+        )
+    } else {
+        format!(
+            "broad query guard triggered: {reason}; narrow the query or rerun with --allow-broad and an explicit --limit"
+        )
+    }
 }
 
 fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {

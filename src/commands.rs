@@ -506,7 +506,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 &workspace.snapshot_id,
                 output::freshness(),
                 json!([service_value]),
-                vec!["HTTP/MCP adapters are expected to wrap the same CLI query service after JSON schema stabilization".to_string()],
+                Vec::new(),
             )
         }
         Command::Query { command } => match command {
