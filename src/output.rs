@@ -1620,6 +1620,9 @@ fn stable_code(message: &str) -> String {
     if message.starts_with("precise_scip_index_unavailable") {
         return "precise_scip_index_unavailable".to_string();
     }
+    if message.starts_with("failed to parse native SCIP index ") {
+        return "failed_to_parse_native_scip_index".to_string();
+    }
     if message.starts_with("failed to resolve path ") {
         return "workspace_path_resolve_failed".to_string();
     }

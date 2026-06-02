@@ -3416,6 +3416,35 @@ fn write_minimal_scip_json(path: &std::path::Path) {
 }
 
 #[test]
+fn native_scip_import_missing_path_uses_stable_caveat_code() {
+    let dir = tempdir().unwrap();
+    let scip_path = dir.path().join("missing.scip");
+
+    let output = raw_code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--output", "json"])
+        .args(["index", "import-scip"])
+        .arg(&scip_path)
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["results"], json!([]));
+    assert_eq!(
+        json["caveats"][0]["code"],
+        "failed_to_parse_native_scip_index"
+    );
+    assert!(json["caveats"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains(scip_path.to_str().unwrap()));
+}
+
+#[test]
 fn native_scip_import_drives_precise_defs_refs_and_symbols() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
