@@ -36,6 +36,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: code-search-windows-amd64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: code-search-windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +131,7 @@ jobs:
             code-search-darwin-arm64.tar.gz
             code-search-linux-amd64.tar.gz
             code-search-windows-amd64.exe.zip
+            code-search-windows-arm64.exe.zip
           )
           for asset in "${assets[@]}"; do
             test -f "$asset"

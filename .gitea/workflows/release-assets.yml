@@ -62,6 +62,7 @@ jobs:
             code-search-darwin-arm64.tar.gz
             code-search-linux-amd64.tar.gz
             code-search-windows-amd64.exe.zip
+            code-search-windows-arm64.exe.zip
             SHA256SUMS
           )
 
