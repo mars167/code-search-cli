@@ -5,6 +5,17 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish, for example v0.1.1. Defaults to the selected ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -28,6 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         run: |
@@ -73,3 +86,74 @@ jobs:
           path: |
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
+
+  publish:
+    name: Publish release assets
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'v')
+    permissions:
+      contents: write
+    env:
+      GITEA_REPOSITORY: ${{ vars.GITEA_REPOSITORY }}
+      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+      GITEA_URL: ${{ vars.GITEA_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve release target
+        id: release-target
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          assets=(
+            code-search-darwin-amd64.tar.gz
+            code-search-darwin-arm64.tar.gz
+            code-search-linux-amd64.tar.gz
+            code-search-windows-amd64.exe.zip
+          )
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+          done
+          sha256sum "${assets[@]}" > SHA256SUMS
+          ls -lh
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.release-target.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --title "$RELEASE_TAG" \
+              --target "$TARGET_SHA" \
+              --notes "Automated release for ${RELEASE_TAG}."
+          fi
+
+      - name: Publish Gitea release assets
+        if: env.GITEA_TOKEN != ''
+        env:
+          TARGET_SHA: ${{ steps.release-target.outputs.sha }}
+        shell: bash
+        run: scripts/upload-gitea-release-assets.sh dist

@@ -1,0 +1,115 @@
+name: Sync Release Assets
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to sync, for example v0.1.1. Defaults to the selected ref.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  GITHUB_RELEASE_REPO: mars167/code-search-cli
+
+jobs:
+  sync:
+    name: Sync GitHub assets to Gitea release
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'v')
+    env:
+      GH_READ_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+      GITEA_REPOSITORY: ${{ github.repository }}
+      GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+      GITEA_URL: ${{ github.server_url }}
+      TARGET_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Prepare tools
+        run: |
+          set -euo pipefail
+          if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl jq python3 coreutils
+          else
+            echo "curl, jq, python3, and sha256sum are required." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Download GitHub release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          expected=(
+            code-search-darwin-amd64.tar.gz
+            code-search-darwin-arm64.tar.gz
+            code-search-linux-amd64.tar.gz
+            code-search-windows-amd64.exe.zip
+            SHA256SUMS
+          )
+
+          api_headers=(-H "Accept: application/vnd.github+json")
+          download_headers=()
+          if [ -n "${GH_READ_TOKEN:-}" ]; then
+            api_headers+=(-H "Authorization: Bearer ${GH_READ_TOKEN}")
+            download_headers+=(-H "Authorization: Bearer ${GH_READ_TOKEN}")
+          fi
+
+          release_json="$(mktemp)"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if status="$(curl -sS -o "$release_json" -w '%{http_code}' "${api_headers[@]}" "https://api.github.com/repos/${GITHUB_RELEASE_REPO}/releases/tags/${RELEASE_TAG}")"; then
+              if [ "$status" = "200" ]; then
+                ready=1
+                for asset in "${expected[@]}"; do
+                  if ! jq -e --arg name "$asset" '.assets[]? | select(.name == $name)' "$release_json" >/dev/null; then
+                    ready=0
+                    break
+                  fi
+                done
+              fi
+            else
+              status="000"
+            fi
+
+            if [ "$ready" -eq 1 ]; then
+              break
+            fi
+
+            echo "Waiting for GitHub release assets for ${RELEASE_TAG} (attempt ${attempt}/90, status ${status})."
+            sleep 20
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "GitHub release assets were not ready for ${RELEASE_TAG}." >&2
+            cat "$release_json" >&2 || true
+            exit 1
+          fi
+
+          for asset in "${expected[@]}"; do
+            url="$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .browser_download_url' "$release_json")"
+            curl -fL --retry 3 "${download_headers[@]}" -o "dist/${asset}" "$url"
+          done
+
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: Publish Gitea release assets
+        shell: bash
+        run: scripts/upload-gitea-release-assets.sh dist
