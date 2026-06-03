@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    graph, lancedb_store, snapshot_store, text_index,
+    graph, lancedb_store, output, snapshot_store, text_index,
     workspace::{read_staged_blob, staged_tree, tracked_files, FileRecord, ScanOptions, Workspace},
 };
 
@@ -74,7 +74,12 @@ pub fn build(
     staged: bool,
     changed: bool,
     force: bool,
+    verbose: output::VerboseLogger,
 ) -> Result<Value> {
+    let changed_only = changed || opts.changed;
+    let mut effective_opts = opts.clone();
+    effective_opts.changed = changed_only;
+
     let snapshot_id = if staged {
         format!(
             "staged:{}",
@@ -84,15 +89,34 @@ pub fn build(
         workspace.snapshot_id.clone()
     };
     let snapshot_key = snapshot_key(&snapshot_id);
+    verbose.log(format!(
+        "index build: snapshot_id={snapshot_id} staged={staged} changed_only={changed_only} force={force}"
+    ));
 
     let records = if staged {
-        staged_records(workspace, None)?
+        let records = staged_records(workspace, None)?;
+        verbose.log(format!("index build: staged records={}", records.len()));
+        records
     } else {
-        let mut scan_opts = opts.clone();
+        let mut scan_opts = effective_opts.clone();
         scan_opts.limit = 0;
+        verbose.log(format!(
+            "index build: scanning include={:?} exclude={:?} hidden={} no_ignore={} lang={:?} changed={}",
+            scan_opts.include,
+            scan_opts.exclude,
+            scan_opts.hidden,
+            scan_opts.no_ignore,
+            scan_opts.lang,
+            scan_opts.changed
+        ));
         let catalog = workspace.scan_catalog(&scan_opts)?;
+        verbose.log(format!("index build: catalog files={}", catalog.len()));
         workspace.materialize_proofs(&catalog)?
     };
+    verbose.log(format!(
+        "index build: materialized proofs={}",
+        records.len()
+    ));
 
     let manifest = Manifest {
         schema_version: INDEX_SCHEMA_VERSION,
@@ -104,17 +128,27 @@ pub fn build(
         head: workspace.head.clone(),
         dirty: workspace.dirty,
         file_count: records.len(),
-        scan_options: IndexScanOptions::from(opts),
+        scan_options: IndexScanOptions::from(&effective_opts),
         created_at_epoch_ms: now_ms(),
     };
 
     // Write compat manifest BEFORE LanceDB — if LanceDB fails,
     // we still have a valid manifest.json for legacy fallback
     let active_dir = active_dir(workspace, staged);
-    fs::create_dir_all(&active_dir)?;
-    write_manifest(&active_dir.join("manifest.json"), &manifest)?;
+    fs::create_dir_all(&active_dir).with_context(|| {
+        format!(
+            "failed to create index metadata dir {}",
+            active_dir.display()
+        )
+    })?;
+    verbose.log(format!(
+        "index build: writing manifest dir={}",
+        active_dir.display()
+    ));
+    write_manifest(&active_dir.join("manifest.json"), &manifest)
+        .with_context(|| format!("failed to write index manifest in {}", active_dir.display()))?;
 
-    write_to_lancedb(workspace, &manifest, &records, staged)
+    write_to_lancedb(workspace, &manifest, &records, staged, verbose)
         .with_context(|| format!("LanceDB write failed for snapshot {}. Run 'code-search index build --force' to rebuild.", manifest.snapshot_id))?;
 
     // Build call graph (best-effort; non-fatal on failure)
@@ -133,7 +167,7 @@ pub fn build(
             "snapshot_id": manifest.snapshot_id,
             "snapshotKey": manifest.snapshot_key,
             "fileCount": manifest.file_count,
-            "changedOnly": changed,
+            "changedOnly": changed_only,
             "force": force,
             "path": root,
             "storageBackend": "lancedb"
@@ -141,13 +175,19 @@ pub fn build(
     }))
 }
 
-pub fn update(workspace: &Workspace, opts: &ScanOptions) -> Result<Value> {
+pub fn update(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    verbose: output::VerboseLogger,
+) -> Result<Value> {
+    verbose.log("index update: checking index status");
     let status = status(workspace)?;
     if status
         .get("fresh")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
+        verbose.log("index update: index already fresh");
         return Ok(json!({
             "updated": false,
             "reason": "index_fresh",
@@ -162,7 +202,8 @@ pub fn update(workspace: &Workspace, opts: &ScanOptions) -> Result<Value> {
         }));
     }
 
-    let mut value = build(workspace, opts, false, true, false)?;
+    verbose.log("index update: rebuilding stale or missing index");
+    let mut value = build(workspace, opts, false, false, false, verbose)?;
     value["updated"] = json!(true);
     value["reason"] = json!("index_stale_or_missing");
     Ok(value)
@@ -1478,20 +1519,31 @@ fn write_to_lancedb(
     manifest: &Manifest,
     records: &[FileRecord],
     staged: bool,
+    verbose: output::VerboseLogger,
 ) -> Result<()> {
+    verbose.log(format!(
+        "index build: opening LanceDB store path={}",
+        lancedb_store::lancedb_root(&workspace.root).display()
+    ));
     let lancedb = lancedb_store::LanceDbStore::open_or_create(&workspace.root)
         .with_context(|| "failed to open LanceDB store")?;
 
+    verbose.log("index build: ensuring LanceDB tables");
     lancedb
         .ensure_tables()
         .with_context(|| "failed to ensure LanceDB tables")?;
 
     let scan_options_json = serde_json::to_string(&manifest.scan_options).unwrap_or_default();
 
+    verbose.log(format!(
+        "index build: replacing LanceDB rows snapshot_id={}",
+        manifest.snapshot_id
+    ));
     lancedb
         .delete_snapshot_rows(&manifest.snapshot_id)
         .with_context(|| "failed to replace old LanceDB snapshot rows")?;
 
+    verbose.log("index build: writing LanceDB snapshot");
     lancedb
         .write_snapshot(
             &manifest.snapshot_id,
@@ -1508,15 +1560,21 @@ fn write_to_lancedb(
         )
         .with_context(|| "failed to write snapshot to LanceDB")?;
 
+    verbose.log(format!(
+        "index build: writing LanceDB file catalog records={}",
+        records.len()
+    ));
     lancedb
         .write_file_catalog(&manifest.snapshot_id, records)
         .with_context(|| "failed to write file catalog to LanceDB")?;
 
+    verbose.log("index build: writing LanceDB file proofs");
     lancedb
         .write_file_proofs(&manifest.snapshot_id, records, Some(&workspace.root))
         .with_context(|| "failed to write file proofs to LanceDB")?;
 
     if !staged {
+        verbose.log("index build: building gram postings");
         let mut gram_index: BTreeMap<[u8; 3], Vec<u32>> = BTreeMap::new();
         for (doc_id, record) in records.iter().enumerate() {
             let bytes = match fs::read(workspace.abs_path(&record.path)) {
@@ -1533,6 +1591,12 @@ fn write_to_lancedb(
             ids.dedup();
         }
         if !gram_index.is_empty() {
+            let posting_count = gram_index.values().map(Vec::len).sum::<usize>();
+            verbose.log(format!(
+                "index build: writing LanceDB gram postings grams={} postings={}",
+                gram_index.len(),
+                posting_count
+            ));
             lancedb
                 .write_gram_postings(&manifest.snapshot_id, &gram_index)
                 .with_context(|| "failed to write gram postings to LanceDB")?;
@@ -1543,9 +1607,11 @@ fn write_to_lancedb(
 }
 
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
-    let mut file = File::create(path)?;
-    serde_json::to_writer_pretty(&mut file, manifest)?;
-    writeln!(file)?;
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    serde_json::to_writer_pretty(&mut file, manifest)
+        .with_context(|| format!("failed to serialize manifest to {}", path.display()))?;
+    writeln!(file).with_context(|| format!("failed to finalize {}", path.display()))?;
     Ok(())
 }
 

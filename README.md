@@ -44,19 +44,27 @@ cargo run -- defs Workspace
 cargo run -- find "Workspace" --save-query workspace-find
 cargo run -- query replay workspace-find
 cargo run -- index build
+cargo run -- -v --output json index build --force
 cargo run -- index status
 cargo run -- mcp
 ```
 
-默认输出是短文本；需要机器读取时使用 `--output json` 或 `--output jsonl`。公开 JSON 只包含 `results`、`page` 和 `caveats`；每个 caveat 都带稳定 `severity` 与 `category`，用于区分风险警告和预期能力级别说明。修改代码前用 `read` 验证搜索、remote 或图候选结果。
+默认输出是短文本；需要机器读取时使用 `--output json` 或 `--output jsonl`。公开 JSON 只包含 `results`、`page` 和 `caveats`；每个 caveat 都带稳定 `severity` 与 `category`，用于区分风险警告和预期能力级别说明。调试本地问题时可以加 `-v`/`--verbose`，诊断日志会写到 stderr，不污染 stdout 的 JSON/text 结果。例如排查 Windows 索引构建问题时可运行：
+
+```bash
+code-search -v --output json index build --force > out.json 2> debug.log
+```
+
+修改代码前用 `read` 验证搜索、remote 或图候选结果。
 
 ## 当前实现
 
-- CLI 命令面由 `clap` 定义，默认 `text`，支持 `json`、`compact-json`、`jsonl` 与 `text` 输出。
+- CLI 命令面由 `clap` 定义，默认 `text`，支持 `json`、`compact-json`、`jsonl` 与 `text` 输出；`-v`/`--verbose` 输出命令、workspace、索引扫描和 LanceDB 写入阶段的诊断日志到 stderr。
 - L0 源码事实命令覆盖内容搜索、路径搜索、目录浏览、范围读取、git changed/status。
 - 全局 scope 参数包括 `--include`、`--exclude`、`--lang`、`--changed`、`--cursor`、`--allow-broad`、`--limit`、`--context` 和 `--save-query`。
 - `--save-query` 将可重放查询保存到 `.code-search/queries/`；`query replay/show/list/delete` 管理 saved query。snapshot 不匹配时，默认按当前 workspace 重放并给 caveat；`--snapshot saved` 会拒绝不匹配的重放。
-- `index build` 使用 LanceDB 作为主要本地索引存储，保存 snapshot、file catalog、file proof 和 gram postings，并保留 manifest 供 pack/unpack 兼容。dirty worktree 查询会对仍 fresh 的文件使用索引，对变更文件使用 live overlay。
+- `index build` 使用 LanceDB 作为主要本地索引存储，保存 snapshot、file catalog、file proof 和 gram postings，并保留 manifest 供 pack/unpack 兼容。`index build --changed` 只扫描 git changed 文件；`index update` 在需要重建时仍按当前 scope 完整刷新索引。dirty worktree 查询会对仍 fresh 的文件使用索引，对变更文件使用 live overlay。
+- 索引构建和文件扫描错误会保留 cause chain，并在 metadata、manifest、LanceDB 等边界带上路径或阶段上下文，便于定位底层 OS 错误。
 - `index pack/unpack` 支持 remote snapshot；remote 结果必须标记 `remote_verified` 或 `remote_unverified`，关键结果仍需 `read` 验证。
 - `defs`、`refs`、`symbols` 优先使用 SCIP occurrence store；没有 precise index 时回退到 tree-sitter 或文本搜索。parser fallback 通过 `severity=info, category=capability` 的 caveat 标出；`ambiguous_results` 等需要缩小范围的情况仍是 `severity=warning, category=risk`。调用方用结果里的 `path`/`range` 再执行 `read`。
 - `calls`、`callers` 通过当前 petgraph 后端返回调用候选，可靠性始终是 `inferred_candidate`。

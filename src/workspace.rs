@@ -135,7 +135,8 @@ impl Workspace {
 
         let mut files = Vec::new();
         for entry in builder.build() {
-            let entry = entry?;
+            let entry = entry
+                .with_context(|| format!("failed to scan workspace {}", self.root.display()))?;
             let path = entry.path();
             let Some(file_type) = entry.file_type() else {
                 continue;
@@ -161,7 +162,8 @@ impl Workspace {
             if is_probably_binary(path) {
                 continue;
             }
-            let metadata = fs::metadata(path)?;
+            let metadata =
+                fs::metadata(path).with_context(|| format!("failed to read metadata for {rel}"))?;
             files.push(FileCatalogRecord {
                 path: rel,
                 language,

@@ -163,6 +163,39 @@ fn index_build_text_output_suppresses_progress_when_stderr_is_not_tty() {
 }
 
 #[test]
+fn verbose_index_build_emits_diagnostics_to_stderr() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "needle\n").unwrap();
+
+    let output = code_search()
+        .arg("-v")
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(stdout_json["results"][0]["index"]["used"], true);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("code-search: command=index build"),
+        "missing command diagnostic: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("code-search: index build: catalog files=1"),
+        "missing catalog diagnostic: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("code-search: index build: writing LanceDB file proofs"),
+        "missing LanceDB diagnostic: {stderr:?}"
+    );
+}
+
+#[test]
 fn warnings_are_structured_with_stable_codes() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -2837,6 +2870,44 @@ fn index_build_writes_lancedb_only_storage() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["results"][0]["index"]["used"], true);
     assert_eq!(json["results"][0]["index"]["storageBackend"], "lancedb");
+}
+
+#[test]
+fn index_build_changed_limits_catalog_to_changed_files() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    init_git_repo(dir.path());
+    fs::write(dir.path().join("src/stable.txt"), "stable\n").unwrap();
+    fs::write(dir.path().join("src/changed.txt"), "old\n").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["add", "src"])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["commit", "-m", "init"])
+        .output()
+        .unwrap();
+
+    fs::write(dir.path().join("src/changed.txt"), "new\n").unwrap();
+
+    let output = code_search()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build", "--changed"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let index = &json["results"][0]["index"];
+    assert_eq!(index["changedOnly"], true);
+    assert_eq!(index["fileCount"], 1);
 }
 
 #[test]

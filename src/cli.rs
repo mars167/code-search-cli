@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "code-search")]
@@ -7,6 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub struct Cli {
     #[arg(short, long, default_value = ".")]
     pub path: String,
+
+    #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
+    pub verbose: u8,
 
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,

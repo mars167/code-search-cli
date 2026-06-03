@@ -8,6 +8,10 @@ use crate::{
 };
 
 pub fn run(cli: Cli) -> AppResult<i32> {
+    let verbose = output::VerboseLogger::new(cli.verbose);
+    verbose.log(format!("command={}", command_name(&cli.command)));
+    verbose.log(format!("path={}", cli.path));
+
     let scan_opts = ScanOptions {
         include: cli.include.clone(),
         exclude: cli.exclude.clone(),
@@ -27,6 +31,14 @@ pub fn run(cli: Cli) -> AppResult<i32> {
     }
 
     let workspace = Workspace::discover(&cli.path)?;
+    verbose.log(format!(
+        "workspace root={} snapshot_id={} dirty={} staged={} worktree={}",
+        workspace.root.display(),
+        workspace.snapshot_id,
+        workspace.dirty,
+        workspace.staged_count,
+        workspace.worktree_count
+    ));
     let scope_warnings = scope_warnings(&workspace, &scan_opts);
 
     let value = match &cli.command {
@@ -553,7 +565,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     &cli.output,
                     "Building index",
                     "Index build complete",
-                    || index::build(&workspace, &scan_opts, *staged, *changed, *force),
+                    || index::build(&workspace, &scan_opts, *staged, *changed, *force, verbose),
                 )?;
                 output::response(
                     "index build",
@@ -575,7 +587,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                     &cli.output,
                     "Updating index",
                     "Index update complete",
-                    || index::update(&workspace, &scan_opts)
+                    || index::update(&workspace, &scan_opts, verbose)
                 )?]),
                 Vec::new(),
             ),
@@ -763,6 +775,42 @@ fn page_response(value: Value, page: search::QueryOutput) -> Value {
         ),
         page.budget,
     )
+}
+
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Find { .. } => "find",
+        Command::Grep { .. } => "grep",
+        Command::Files { .. } => "files",
+        Command::FindPath { .. } => "find-path",
+        Command::Glob { .. } => "glob",
+        Command::List { .. } => "list",
+        Command::Tree { .. } => "tree",
+        Command::Read { .. } => "read",
+        Command::Refs { .. } => "refs",
+        Command::Symbols { .. } => "symbols",
+        Command::Defs { .. } => "defs",
+        Command::Calls { .. } => "calls",
+        Command::Callers { .. } => "callers",
+        Command::Changed => "changed",
+        Command::Status => "status",
+        Command::Mcp => "mcp",
+        Command::Watch { .. } => "watch",
+        Command::Serve { .. } => "serve",
+        Command::Query { .. } => "query",
+        Command::Index { command } => match command {
+            IndexCommand::Build { .. } => "index build",
+            IndexCommand::Update => "index update",
+            IndexCommand::Status => "index status",
+            IndexCommand::Verify => "index verify",
+            IndexCommand::Clean => "index clean",
+            IndexCommand::ImportScip { .. } => "index import-scip",
+            IndexCommand::Pack { .. } => "index pack",
+            IndexCommand::Unpack { .. } => "index unpack",
+        },
+        Command::Hooks { .. } => "hooks",
+        Command::Completions { .. } => "completions",
+    }
 }
 
 fn scoped_query(mut query: Value, opts: &ScanOptions) -> Value {

@@ -18,6 +18,27 @@ use crate::cli::OutputFormat;
 
 pub const SCHEMA_VERSION: &str = "1.0";
 
+#[derive(Clone, Copy, Debug)]
+pub struct VerboseLogger {
+    level: u8,
+}
+
+impl VerboseLogger {
+    pub fn new(level: u8) -> Self {
+        Self { level }
+    }
+
+    pub fn enabled(self) -> bool {
+        self.level > 0
+    }
+
+    pub fn log(self, message: impl AsRef<str>) {
+        if self.enabled() {
+            let _ = writeln!(io::stderr(), "code-search: {}", message.as_ref());
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reliability {
@@ -232,8 +253,17 @@ fn live_scan_index() -> Value {
 }
 
 pub fn error_response(error: Error) -> Value {
-    let message = error.to_string();
-    error_response_with_code(&stable_code(&message), message)
+    let mut chain = error.chain();
+    let message = chain
+        .next()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "unknown error".to_string());
+    let mut full_message = message.clone();
+    for cause in chain {
+        full_message.push_str("\ncaused by: ");
+        full_message.push_str(&cause.to_string());
+    }
+    error_response_with_code(&stable_code(&message), full_message)
 }
 
 pub fn error_response_with_code(code: &str, message: impl Into<String>) -> Value {
@@ -662,11 +692,15 @@ fn render_text(value: &Value, out: &mut dyn Write) -> io::Result<()> {
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        writeln!(
-            out,
-            "error: {}",
-            message.lines().next().unwrap_or("unknown error").trim()
-        )?;
+        let mut lines = message.lines();
+        let first = lines.next().unwrap_or("unknown error").trim();
+        writeln!(out, "error: {first}")?;
+        for line in lines {
+            let line = line.trim();
+            if line.starts_with("caused by:") {
+                writeln!(out, "  {line}")?;
+            }
+        }
         return Ok(());
     }
 
