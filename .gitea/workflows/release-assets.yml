@@ -49,6 +49,9 @@ jobs:
             exit 1
           fi
 
+      - name: Configure internal Gitea TLS
+        run: git config --global http.https://git.home.arpa/.sslVerify false
+
       - uses: actions/checkout@v4
 
       - name: Download GitHub release assets
