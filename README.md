@@ -1,39 +1,13 @@
 # CodeTrail
+[![GitHub release](https://img.shields.io/github/v/release/mars167/CodeTrail?label=release)](https://github.com/mars167/CodeTrail/releases)
 
-面向开发者和 LLM Agent 的本地优先代码搜索 CLI。
+[中文](README.zh-CN.md)
 
-CodeTrail 的核心承诺不是“理解代码”，而是快速给出可验证的代码证据：搜索、路径定位、范围读取、定义、引用、调用候选、索引状态和 MCP 工具输出都围绕可读取的结果、分页和 caveats 组织。
+A local-index-first code search tool for fast, verifiable source evidence.
 
-## 文档
+CodeTrail's core promise is not to "understand the code"—it is to return verifiable evidence quickly. Search, symbol location, range reading, definitions, references, call candidates, index status, and MCP output are all organized around readable results, pagination, and caveats.
 
-更多设计说明：
-
-| 文档 | 内容 |
-| --- | --- |
-| [`docs/00-design-summary.md`](docs/00-design-summary.md) | 产品定位、文档边界、总览图 |
-| [`docs/01-architecture.md`](docs/01-architecture.md) | snapshot、索引、查询、watcher、remote 架构 |
-| [`docs/02-command-contract.md`](docs/02-command-contract.md) | 命令族、JSON 响应、可靠性契约 |
-| [`docs/03-quality.md`](docs/03-quality.md) | 本地质量门禁、CI 映射、性能看护边界 |
-
-命令参数以 `codetrail --help` 和 `src/cli.rs` 为准；实现细节以 `src/`、`tests/` 和 `scripts/` 为准。
-
-## Codex Skill
-
-本仓库包含一个给 Codex/LLM Agent 使用的 skill：
-
-```text
-skills/codetrail/
-```
-
-它说明了 agent 应如何用 `codetrail` 获取可验证的源码证据、处理 reliability 分级、重放 saved query、检查 index freshness，并验证 MCP/JSON 契约。需要随项目使用时，可以把该目录复制到本机 Codex skills 目录：
-
-```bash
-cp -R skills/codetrail "${CODEX_HOME:-$HOME/.codex}/skills/"
-```
-
-## 快速使用
-
-### 一行安装
+## Installation
 
 macOS/Linux:
 
@@ -47,9 +21,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/mars167/CodeTrail/main/install.ps1 | iex
 ```
 
-安装器会根据当前系统下载最新 GitHub Release 资产，校验 `SHA256SUMS`，并安装 `codetrail`。macOS/Linux 默认安装到 `~/.local/bin`，Windows 默认安装到 `%LOCALAPPDATA%\Programs\codetrail\bin` 并写入用户 `PATH`。
+The installer downloads the latest GitHub Release assets for your OS, verifies `SHA256SUMS`, and installs `codetrail`. On macOS/Linux, it is installed by default to `~/.local/bin`. On Windows, it is installed to `%LOCALAPPDATA%\Programs\codetrail\bin` and added to your user `PATH`.
 
-安装指定版本：
+Install a specific version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mars167/CodeTrail/main/install.sh | sh -s -- --version v0.1.4
@@ -59,40 +33,161 @@ curl -fsSL https://raw.githubusercontent.com/mars167/CodeTrail/main/install.sh |
 $env:CODETRAIL_VERSION = "v0.1.4"; irm https://raw.githubusercontent.com/mars167/CodeTrail/main/install.ps1 | iex
 ```
 
-```bash
-cargo build
-cargo test
+## Quick Start
 
-cargo run -- find "Workspace"
-cargo run -- grep "fn .*status"
-cargo run -- read src/main.rs:1-40
-cargo run -- defs Workspace
-cargo run -- find "Workspace" --save-query workspace-find
-cargo run -- query replay workspace-find
-cargo run -- index build
-cargo run -- -v --output json index build --force
-cargo run -- index status
-cargo run -- mcp
+```bash
+codetrail index build
+codetrail find "TODO"
+codetrail read README.md:1-40
 ```
 
-默认输出是短文本；需要机器读取时使用 `--output json` 或 `--output jsonl`。公开 JSON 只包含 `results`、`page` 和 `caveats`；每个 caveat 都带稳定 `severity` 与 `category`，用于区分风险警告和预期能力级别说明。调试本地问题时可以加 `-v`/`--verbose`，诊断日志会写到 stderr，不污染 stdout 的 JSON/text 结果。例如排查 Windows 索引构建问题时可运行：
+Default output is concise text. For machine consumption, use `--output json` or `--output jsonl`. For full argument details, run `codetrail --help` and check `src/cli.rs`.
+
+## Common Commands
+
+Content and path search:
+
+```bash
+codetrail find "TODO"
+codetrail grep "fn [a-z_]+"
+codetrail files "README"
+codetrail glob "src/**/*.rs"
+```
+
+Range read and symbol lookup:
+
+```bash
+codetrail read README.md:1-40
+codetrail defs main
+codetrail refs main
+codetrail symbols query
+```
+
+Indexing and saved query:
+
+```bash
+codetrail index build
+codetrail index status
+codetrail find "TODO" --save-query todo-find
+codetrail query replay todo-find
+```
+
+When debugging local issues, add `-v`/`--verbose` to send diagnostic logs to stderr and keep stdout clean for JSON/text output:
 
 ```bash
 codetrail -v --output json index build --force > out.json 2> debug.log
 ```
 
-修改代码前用 `read` 验证搜索、remote 或图候选结果。
+MCP integration:
 
-## 当前实现
+```bash
+codetrail mcp
+```
 
-- CLI 命令面由 `clap` 定义，默认 `text`，支持 `json`、`compact-json`、`jsonl` 与 `text` 输出；`-v`/`--verbose` 输出命令、workspace、索引扫描和 LanceDB 写入阶段的诊断日志到 stderr。
-- L0 源码事实命令覆盖内容搜索、路径搜索、目录浏览、范围读取、git changed/status。
-- 全局 scope 参数包括 `--include`、`--exclude`、`--lang`、`--changed`、`--cursor`、`--allow-broad`、`--limit`、`--context` 和 `--save-query`。
-- `--save-query` 将可重放查询保存到 `.codetrail/queries/`；`query replay/show/list/delete` 管理 saved query。snapshot 不匹配时，默认按当前 workspace 重放并给 caveat；`--snapshot saved` 会拒绝不匹配的重放。
-- `index build` 使用 LanceDB 作为主要本地索引存储，保存 snapshot、file catalog、file proof 和 gram postings，并保留 manifest 供 pack/unpack 兼容。`index build --changed` 只扫描 git changed 文件；`index update` 在需要重建时仍按当前 scope 完整刷新索引。dirty worktree 查询会对仍 fresh 的文件使用索引，对变更文件使用 live overlay。
-- 索引构建和文件扫描错误会保留 cause chain，并在 metadata、manifest、LanceDB 等边界带上路径或阶段上下文，便于定位底层 OS 错误。
-- `index pack/unpack` 支持 remote snapshot；remote 结果必须标记 `remote_verified` 或 `remote_unverified`，关键结果仍需 `read` 验证。
-- `defs`、`refs`、`symbols` 优先使用 SCIP occurrence store；没有 precise index 时回退到 tree-sitter 或文本搜索。parser fallback 通过 `severity=info, category=capability` 的 caveat 标出；`ambiguous_results` 等需要缩小范围的情况仍是 `severity=warning, category=risk`。调用方用结果里的 `path`/`range` 再执行 `read`。
-- `calls`、`callers` 通过当前 petgraph 后端返回调用候选，可靠性始终是 `inferred_candidate`。
-- `watch --once` 提供按需 reconcile；`serve` 暴露本地 query service 状态；`mcp` 通过 stdio JSON-RPC 包装同一套查询能力，并输出同一 public JSON 投影。
-- `scripts/quality-gate.sh` 是本地与 CI 的统一质量入口。
+## Result Reliability
+
+Public JSON responses only include `results`, `page`, and `caveats`. Each caveat carries a stable `severity` and `category` to distinguish risk warnings from expected capability-level caveats.
+
+Before editing code, verify search, remote, or graph-derived results with `read`. Different source types are represented with different reliability levels: text hits are verifiable clues, SCIP occurrences are more precise but still need range review, parser fallback and call candidates are not semantic proof, and remote results must be clearly marked when they are not aligned with local file proof.
+
+## Architecture
+
+CodeTrail separates "searchability" from "trustworthiness": indexing speeds up discovery, but answers must always be traceable back to local files, snapshots, ranges, and reliability notes. CLI and MCP share the same query service so different integrations do not get different facts.
+
+```mermaid
+flowchart TB
+  User["Developer / LLM Agent"] --> Entry["CLI / MCP"]
+  Entry --> Query["Query service"]
+
+  Git["Git repository\nHEAD / index / worktree"] --> Snapshot["Snapshot identity"]
+  Files["Local source files"] --> Freshness["Freshness proof\npath / size / mtime / hash"]
+  Snapshot --> Freshness
+
+  Freshness --> Index["Local index\n.codetrail/index.lance"]
+  Freshness --> Live["Live scan / dirty overlay"]
+  Freshness --> Saved["Saved query metadata"]
+  Remote["Remote snapshot cache"] --> Verify["Local proof verification"]
+
+  Index --> Text["Text and path candidates"]
+  Index --> Occ["SCIP occurrences"]
+  Freshness --> Parser["Parser fallback"]
+  Freshness --> Graph["Call candidates"]
+  Verify --> RemoteResults["Verified or unverified remote results"]
+
+  Text --> Query
+  Occ --> Query
+  Parser --> Query
+  Graph --> Query
+  Live --> Query
+  Saved --> Query
+  RemoteResults --> Query
+
+  Query --> Output["Results with ranges,\nreliability and caveats"]
+  Output --> Read["read verifies exact source ranges"]
+```
+
+Core boundaries:
+
+- Snapshot is the truth boundary: results must declare whether they come from commit, staged, or worktree state; different sources must not be merged into one untraceable answer.
+- Local index is the acceleration layer: when index data is missing, stale, or partial, queries should fall back to live scanning, dirty overlay, or return clear caveats.
+- Query service is the integration boundary: CLI, MCP, saved query replay, and remote snapshots all share the same public JSON/text projection.
+- Reliability is an interface contract: text hits, exact occurrences, parser fallbacks, call candidates, and remote results must use different reliability levels; key edits should still be rechecked with `read`.
+- Remote and saved query are not ground truth: remote is only confidence-boosting when aligned with local proof; saved query stores only replay metadata, never full result payloads.
+
+## Agent Skill
+
+This repository includes an LLM Agent Skill:
+
+```text
+skills/codetrail/
+```
+
+It explains how an agent should use `codetrail` to collect verifiable source evidence, apply reliability grading, replay saved queries, check index freshness, and validate MCP/JSON contracts. When using with this repository, install the Skill from the repo:
+
+```bash
+npx skills add https://github.com/mars167/CodeTrail --skill codetrail
+```
+
+If you are already inside this repository checkout, install from local root:
+
+```bash
+npx skills add . --skill codetrail
+```
+
+## Documentation
+
+Design references:
+
+| Document | Details |
+| --- | --- |
+| [`docs/00-design-summary.md`](docs/00-design-summary.md) | Product positioning, boundaries, and architecture overview |
+| [`docs/01-architecture.md`](docs/01-architecture.md) | Snapshot, index, query, watcher, and remote architecture |
+| [`docs/02-command-contract.md`](docs/02-command-contract.md) | Command families, JSON responses, and reliability contracts |
+| [`docs/03-quality.md`](docs/03-quality.md) | Local quality gate, CI mapping, performance and reliability safeguards |
+
+Implementation details should be treated as the source of truth in `src/`, `tests/`, and `scripts/`.
+
+## Local Development
+
+```bash
+cargo build
+cargo test
+```
+
+Unified local/CI quality entrypoint:
+
+```bash
+scripts/quality-gate.sh pr
+scripts/quality-gate.sh main
+scripts/quality-gate.sh bench
+```
+
+`quick` is an alias for `pr`, `cli` is an alias for `main`, and `full` runs `main` then `bench`.
+
+## Contributing
+
+Please report issues and improvements via pull requests. If you touch command contracts, reliability levels, indexing, remote behavior, watcher logic, or MCP output, update related documentation and run the relevant quality gates.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
