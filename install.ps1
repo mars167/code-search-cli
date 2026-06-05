@@ -27,11 +27,18 @@ if ($env:CODE_SEARCH_DRY_RUN -eq "1") {
 function Get-CodeSearchArchitecture {
     $arch = $env:CODE_SEARCH_ARCH
     if ([string]::IsNullOrWhiteSpace($arch)) {
+        $arch = $env:PROCESSOR_ARCHITEW6432
+    }
+    if ([string]::IsNullOrWhiteSpace($arch)) {
+        $arch = $env:PROCESSOR_ARCHITECTURE
+    }
+    if ([string]::IsNullOrWhiteSpace($arch)) {
         $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     }
 
     switch -Regex ($arch) {
         "^(X64|x86_64|amd64)$" { return "amd64" }
+        "^(AMD64)$" { return "amd64" }
         "^(Arm64|ARM64|arm64|aarch64)$" { return "arm64" }
         default { throw "Unsupported architecture: $arch" }
     }
