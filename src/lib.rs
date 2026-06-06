@@ -22,6 +22,7 @@ pub mod text_index;
 pub mod watcher;
 pub mod workspace;
 
+pub mod go_provider;
 pub mod graph;
 pub mod mcp;
 pub mod query;
