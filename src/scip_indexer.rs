@@ -65,10 +65,23 @@ pub fn generate_and_import(project_root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::process::Command;
     use tempfile::tempdir;
+
+    fn go_available() -> bool {
+        Command::new("go")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 
     #[test]
     fn go_indexer_produces_output_for_valid_project() {
+        if !go_available() {
+            eprintln!("skipping test: Go toolchain not available");
+            return;
+        }
         let dir = tempdir().unwrap();
         let project = dir.path();
         fs::create_dir_all(project.join("pkg")).unwrap();

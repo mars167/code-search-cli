@@ -7,11 +7,10 @@
 //! Diff evidence must align with query freshness proof: a diff returned for
 //! snapshot `S1` must not be interpreted against query evidence from `S2`.
 
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::generation_manifest::{FreshnessGate, ProofHashes};
+use crate::generation_manifest::FreshnessGate;
 
 // ── Diff target ─────────────────────────────────────────────────────────────
 
@@ -248,7 +247,7 @@ mod tests {
 
     #[test]
     fn diff_freshness_alignment_detects_blocked_roots() {
-        use crate::generation_manifest::GenerationManifest;
+        use crate::generation_manifest::{GenerationManifest, ProofHashes};
         use crate::project_graph::{ProjectLanguage, ProjectRoot, ProjectRootKind};
 
         let root = ProjectRoot {
