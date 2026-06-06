@@ -26,6 +26,7 @@ env:
   SCCACHE_CACHE_SIZE: 8G
   RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
   RUOYI_REPO_URL: https://git.home.arpa/mars/RuoYi.git
   RUOYI_BRANCH: master
   RUOYI_CACHE_DIR: /cache/codetrail/fixtures/RuoYi
