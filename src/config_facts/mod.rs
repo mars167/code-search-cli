@@ -1,9 +1,21 @@
 //! Static config and script fact extraction.
 //!
-//! Config/script facts are intentionally separate from precise SCIP facts. They
-//! describe build/runtime/deployment inputs and carry affected-root edges from
-//! `ProjectGraph` so freshness and search callers do not need a second root
-//! inference model.
+//! Planned submodule split (tracked in #113):
+//!   src/config_facts/
+//!   ├── mod.rs        — public types, dispatcher, helpers
+//!   ├── json.rs       — JSON extraction
+//!   ├── yaml.rs       — YAML extraction + validation
+//!   ├── toml.rs       — TOML extraction + validation
+//!   ├── ini.rs        — INI/properties/conf extraction
+//!   ├── ci.rs         — CI workflow extraction
+//!   ├── shell.rs      — Shell script extraction
+//!   ├── makefile.rs   — Makefile extraction
+//!   ├── docker.rs     — Docker/Compose extraction
+//!   └── k8s.rs        — Kubernetes manifest extraction
+//!
+//! Current state: all extraction functions live in mod.rs with clear section
+//! boundaries. The split is deferred to avoid Rust module system friction
+//! with cross-cutting helper dependencies.
 
 use std::{
     borrow::Cow,
