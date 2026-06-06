@@ -17,6 +17,30 @@ fn write(path: &std::path::Path, content: &str) {
     fs::write(path, content).unwrap();
 }
 
+fn assert_parse_failure_fallback(path: &str, source: &str, forbidden: &str) {
+    let dir = tempdir().unwrap();
+    write(
+        &dir.path().join("package.json"),
+        "{\"scripts\":{\"test\":\"node test.js\"}}\n",
+    );
+    write(&dir.path().join("src/app.ts"), "export const app = 1;\n");
+    write(&dir.path().join(path), source);
+
+    let graph = discover_project_graph(dir.path()).unwrap();
+    let facts =
+        extract_config_facts_for_file(path, source, &graph, ConfigFactExtractOptions::test());
+
+    assert_eq!(facts.len(), 1, "expected one source fallback for {path}");
+    let fallback = &facts[0];
+    assert_eq!(fallback.fact_kind, ConfigFactKind::SourceFactFallback);
+    assert_eq!(fallback.reliability, FactReliability::SourceFact);
+    assert!(fallback
+        .caveats
+        .iter()
+        .any(|caveat| caveat.code == ConfigFactCaveatCode::ParseFailure));
+    assert!(!serde_json::to_string(fallback).unwrap().contains(forbidden));
+}
+
 #[test]
 fn extracts_structured_config_key_paths_and_supports_key_filtering() {
     let dir = tempdir().unwrap();
@@ -331,4 +355,29 @@ fn malformed_toml_yields_parse_failure_source_fact_fallback_without_secret_leak(
     assert!(!serde_json::to_string(fallback)
         .unwrap()
         .contains("not-a-real-test-secret"));
+}
+
+#[test]
+fn real_yaml_parser_rejects_unterminated_secret_scalar_with_source_fallback() {
+    assert_parse_failure_fallback(
+        "config/bad-secret.yaml",
+        "api_key: \"not-a-real-test-secret\n",
+        "not-a-real-test-secret",
+    );
+}
+
+#[test]
+fn real_toml_parser_rejects_invalid_number_and_unclosed_array_with_source_fallback() {
+    for (path, source) in [
+        (
+            "config/bad-number.toml",
+            "port = 8080abc\napi_key = \"not-a-real-test-secret\"\n",
+        ),
+        (
+            "config/bad-array.toml",
+            "items = [1, 2\napi_key = \"not-a-real-test-secret\"\n",
+        ),
+    ] {
+        assert_parse_failure_fallback(path, source, "not-a-real-test-secret");
+    }
 }

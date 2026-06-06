@@ -401,71 +401,22 @@ fn collect_yaml_key_values(source: &str) -> Vec<RawKeyValue> {
 }
 
 fn validate_yaml_structure(source: &str) -> std::result::Result<(), String> {
-    let mut previous: Option<(usize, bool)> = None;
-    let mut block_scalar_indent: Option<usize> = None;
-
-    for (line_index, line) in source.lines().enumerate() {
-        let content = line.trim();
-        if content.is_empty() || content.starts_with('#') || content == "---" || content == "..." {
-            continue;
-        }
-
-        let indent = leading_spaces(line);
-        if let Some(block_indent) = block_scalar_indent {
-            if indent > block_indent {
-                continue;
-            }
-            block_scalar_indent = None;
-        }
-
-        if let Some((previous_indent, previous_can_have_children)) = previous {
-            if indent > previous_indent && !previous_can_have_children {
-                return Err(format!(
-                    "structured YAML parse failed near line {}: indentation increased after a scalar value",
-                    line_index + 1
-                ));
-            }
-        }
-
-        let (sequence_item, stripped) = content
-            .strip_prefix("- ")
-            .map(|rest| (true, rest.trim()))
-            .unwrap_or((false, content));
-
-        let can_have_children = if let Some((key, value)) = split_yaml_pair(stripped) {
-            let key = clean_key(key);
-            if key.is_empty() {
-                return Err(format!(
-                    "structured YAML parse failed near line {}: empty key",
-                    line_index + 1
-                ));
-            }
-            let value = value.trim();
-            if value.is_empty() || is_yaml_block_scalar(value) {
-                if is_yaml_block_scalar(value) {
-                    block_scalar_indent = Some(indent);
-                }
-                true
-            } else {
-                sequence_item
-            }
-        } else if sequence_item {
-            false
-        } else {
-            return Err(format!(
-                "structured YAML parse failed near line {}: expected key-value or sequence item",
-                line_index + 1
-            ));
-        };
-
-        previous = Some((indent, can_have_children));
+    if !has_yaml_content(source) {
+        return Ok(());
     }
 
+    for document in serde_yaml::Deserializer::from_str(source) {
+        serde_yaml::Value::deserialize(document)
+            .map_err(|_| "structured YAML parse failed".to_string())?;
+    }
     Ok(())
 }
 
-fn is_yaml_block_scalar(value: &str) -> bool {
-    value.starts_with('|') || value.starts_with('>')
+fn has_yaml_content(source: &str) -> bool {
+    source.lines().any(|line| {
+        let content = line.trim();
+        !content.is_empty() && !content.starts_with('#') && content != "---" && content != "..."
+    })
 }
 
 fn extract_toml(
@@ -523,73 +474,9 @@ fn extract_toml(
 }
 
 fn validate_toml_structure(source: &str) -> std::result::Result<(), String> {
-    for (line_index, line) in source.lines().enumerate() {
-        let content = line.trim();
-        if content.is_empty() || content.starts_with('#') {
-            continue;
-        }
-
-        if content.starts_with('[') {
-            if !content.ends_with(']') || !valid_toml_table_header(content) {
-                return Err(format!(
-                    "structured TOML parse failed near line {}: malformed table header",
-                    line_index + 1
-                ));
-            }
-            continue;
-        }
-
-        let Some((key, value)) = split_once_any(content, &['=']) else {
-            return Err(format!(
-                "structured TOML parse failed near line {}: expected key-value assignment",
-                line_index + 1
-            ));
-        };
-        if clean_key(key).is_empty() || value.trim().is_empty() {
-            return Err(format!(
-                "structured TOML parse failed near line {}: empty key or value",
-                line_index + 1
-            ));
-        }
-        if has_unbalanced_quotes(value) {
-            return Err(format!(
-                "structured TOML parse failed near line {}: unbalanced quoted value",
-                line_index + 1
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn valid_toml_table_header(content: &str) -> bool {
-    let inner = content.trim_start_matches('[').trim_end_matches(']').trim();
-    !inner.is_empty()
-        && !inner.starts_with('.')
-        && !inner.ends_with('.')
-        && !inner.split('.').any(|part| clean_key(part).is_empty())
-}
-
-fn has_unbalanced_quotes(value: &str) -> bool {
-    let mut double_quotes = 0usize;
-    let mut single_quotes = 0usize;
-    let mut escaped = false;
-    for ch in value.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '"' {
-            double_quotes += 1;
-        } else if ch == '\'' {
-            single_quotes += 1;
-        }
-    }
-    double_quotes % 2 != 0 || single_quotes % 2 != 0
+    toml::from_str::<toml::Value>(source)
+        .map(|_| ())
+        .map_err(|_| "structured TOML parse failed".to_string())
 }
 
 fn extract_ini_like(
