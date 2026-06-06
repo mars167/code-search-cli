@@ -622,6 +622,25 @@ pub fn run(cli: Cli) -> AppResult<i32> {
                 json!([index::clean(&workspace)?]),
                 Vec::new(),
             ),
+            IndexCommand::GenerateScip { lang, output: out_path } => {
+                if lang != "go" {
+                    anyhow::bail!("SCIP generation is currently only supported for Go (--lang go)");
+                }
+                let out = out_path.as_deref().unwrap_or("index.scip.json");
+                crate::scip_indexer::generate_go_scip(
+                    std::path::Path::new(&cli.path),
+                    std::path::Path::new(out),
+                )?;
+                output::response(
+                    "index generate-scip",
+                    "index generate-scip",
+                    json!({"lang": lang, "output": out}),
+                    &workspace.snapshot_id,
+                    output::freshness(),
+                    json!([{"status": "generated", "output": out}]),
+                    Vec::new(),
+                )
+            }
             IndexCommand::ImportScip { path } => {
                 let input = std::fs::read(path).unwrap_or_default();
                 // Skip leading whitespace/BOM to detect JSON format
@@ -805,6 +824,7 @@ fn command_name(command: &Command) -> &'static str {
             IndexCommand::Verify => "index verify",
             IndexCommand::Clean => "index clean",
             IndexCommand::ImportScip { .. } => "index import-scip",
+            IndexCommand::GenerateScip { .. } => "index generate-scip",
             IndexCommand::Pack { .. } => "index pack",
             IndexCommand::Unpack { .. } => "index unpack",
         },

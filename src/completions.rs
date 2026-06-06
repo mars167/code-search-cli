@@ -46,7 +46,7 @@ fn bash() -> String {
   prev="${{COMP_WORDS[COMP_CWORD-1]}}"
   commands="{commands}"
   query_cmds="replay show list delete"
-  index_cmds="build update status verify clean import-scip"
+  index_cmds="build update status verify clean import-scip generate-scip"
   hooks_cmds="install uninstall status"
   shells="bash zsh fish"
 

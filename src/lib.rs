@@ -17,6 +17,7 @@ pub mod rust_provider;
 pub mod saved_query;
 pub mod scip;
 pub mod scip_index;
+pub mod scip_indexer;
 pub mod scip_proto;
 pub mod search;
 pub mod semantic_facts;
