@@ -405,8 +405,8 @@ fn validate_yaml_structure(source: &str) -> std::result::Result<(), String> {
         return Ok(());
     }
 
-    for document in serde_yaml::Deserializer::from_str(source) {
-        serde_yaml::Value::deserialize(document)
+    for document in serde_yml::Deserializer::from_str(source) {
+        serde_yml::Value::deserialize(document)
             .map_err(|_| "structured YAML parse failed".to_string())?;
     }
     Ok(())
