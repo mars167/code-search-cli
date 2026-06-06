@@ -1,10 +1,17 @@
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+
 use codetrail::{
     project_graph::{ProjectLanguage, ProjectRoot, ProjectRootKind},
     semantic_provider::{
-        NormalizedSemanticFact, PartialReason, ProviderBudget, ProviderCapabilities,
-        ProviderFailure, ProviderFailureReason, ProviderRootState, ProviderSession,
-        ProviderSessionInput, QueuePriority, SemanticBatchResult, SemanticProbe, SemanticProbeKind,
-        SemanticProvider, SemanticProviderVersion, SemanticRange, SemanticScheduler,
+        DeferredReason, NormalizedSemanticFact, PartialReason, ProviderBudget,
+        ProviderCapabilities, ProviderFailure, ProviderFailureReason, ProviderRootState,
+        ProviderSession, ProviderSessionInput, QueuePriority, SchedulerClock, SemanticBatchResult,
+        SemanticProbe, SemanticProbeKind, SemanticProvider, SemanticProviderVersion, SemanticRange,
+        SemanticScheduler,
     },
 };
 
@@ -23,6 +30,12 @@ struct FakeProvider {
     language: ProjectLanguage,
     budget: ProviderBudget,
     behavior: FakeBehavior,
+    elapsed_ms: u64,
+    state: Arc<Mutex<FakeProviderState>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FakeProviderState {
     started_roots: Vec<String>,
     resolved_batches: Vec<Vec<SemanticProbe>>,
     shutdown_roots: Vec<String>,
@@ -41,15 +54,50 @@ impl FakeProvider {
                 idle_shutdown_ms: 1_000,
                 max_memory_mb: 512,
             },
-            started_roots: Vec::new(),
-            resolved_batches: Vec::new(),
-            shutdown_roots: Vec::new(),
+            elapsed_ms: 0,
+            state: Arc::new(Mutex::new(FakeProviderState::default())),
         }
     }
 
     fn with_budget(mut self, budget: ProviderBudget) -> Self {
         self.budget = budget;
         self
+    }
+
+    fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = elapsed_ms;
+        self
+    }
+
+    fn state(&self) -> Arc<Mutex<FakeProviderState>> {
+        Arc::clone(&self.state)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ManualClock {
+    now_ms: Rc<Cell<u64>>,
+}
+
+impl ManualClock {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            now_ms: Rc::new(Cell::new(now_ms)),
+        }
+    }
+
+    fn set(&self, now_ms: u64) {
+        self.now_ms.set(now_ms);
+    }
+
+    fn advance(&self, elapsed_ms: u64) {
+        self.now_ms.set(self.now_ms.get() + elapsed_ms);
+    }
+}
+
+impl SchedulerClock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.now_ms.get()
     }
 }
 
@@ -92,7 +140,11 @@ impl SemanticProvider for FakeProvider {
         &mut self,
         input: ProviderSessionInput,
     ) -> Result<ProviderSession, ProviderFailure> {
-        self.started_roots.push(input.root.id.clone());
+        self.state
+            .lock()
+            .unwrap()
+            .started_roots
+            .push(input.root.id.clone());
         match self.behavior {
             FakeBehavior::StartFailure => Err(ProviderFailure {
                 root_id: input.root.id,
@@ -114,7 +166,11 @@ impl SemanticProvider for FakeProvider {
         session: &ProviderSession,
         probes: &[SemanticProbe],
     ) -> SemanticBatchResult {
-        self.resolved_batches.push(probes.to_vec());
+        self.state
+            .lock()
+            .unwrap()
+            .resolved_batches
+            .push(probes.to_vec());
         match &self.behavior {
             FakeBehavior::Timeout => SemanticBatchResult::partial(
                 session,
@@ -152,7 +208,62 @@ impl SemanticProvider for FakeProvider {
     }
 
     fn shutdown_idle(&mut self, root_id: &str) {
-        self.shutdown_roots.push(root_id.to_string());
+        self.state
+            .lock()
+            .unwrap()
+            .shutdown_roots
+            .push(root_id.to_string());
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TimedFakeProvider {
+    inner: FakeProvider,
+    clock: ManualClock,
+}
+
+impl TimedFakeProvider {
+    fn new(inner: FakeProvider, clock: ManualClock) -> Self {
+        Self { inner, clock }
+    }
+}
+
+impl SemanticProvider for TimedFakeProvider {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn language(&self) -> ProjectLanguage {
+        self.inner.language()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn budget(&self) -> ProviderBudget {
+        self.inner.budget()
+    }
+
+    fn start_session(
+        &mut self,
+        input: ProviderSessionInput,
+    ) -> Result<ProviderSession, ProviderFailure> {
+        self.inner.start_session(input)
+    }
+
+    fn resolve_batch(
+        &mut self,
+        session: &ProviderSession,
+        probes: &[SemanticProbe],
+    ) -> SemanticBatchResult {
+        let result = self.inner.resolve_batch(session, probes);
+        self.clock.advance(self.inner.elapsed_ms);
+        result
+    }
+
+    fn shutdown_idle(&mut self, root_id: &str) {
+        self.inner.shutdown_idle(root_id);
     }
 }
 
@@ -392,4 +503,153 @@ fn provider_budget_limits_batch_size_and_reports_resource_limit() {
     );
     assert_eq!(report.resolved_probe_count, 1);
     assert_eq!(report.deferred_probe_count, 1);
+}
+
+#[test]
+fn provider_budget_limits_roots_per_pass_and_defers_the_rest() {
+    let roots = vec![
+        root("rust:a", "a", ProjectLanguage::Rust),
+        root("rust:b", "b", ProjectLanguage::Rust),
+        root("rust:c", "c", ProjectLanguage::Rust),
+    ];
+    let budget = ProviderBudget {
+        max_concurrent_roots: 1,
+        max_concurrent_resolves_per_root: 8,
+        single_symbol_timeout_ms: 25,
+        idle_shutdown_ms: 1_000,
+        max_memory_mb: 512,
+    };
+    let provider = FakeProvider::new(
+        "rust-analyzer-fake",
+        ProjectLanguage::Rust,
+        FakeBehavior::Ok,
+    )
+    .with_budget(budget);
+    let provider_state = provider.state();
+
+    let mut scheduler = SemanticScheduler::default();
+    scheduler.register_provider(Box::new(provider));
+    let report = scheduler.resolve(
+        roots,
+        vec![
+            probe(
+                "rust:a",
+                ProjectLanguage::Rust,
+                "a/src/lib.rs",
+                QueuePriority::CurrentQuery,
+            ),
+            probe(
+                "rust:b",
+                ProjectLanguage::Rust,
+                "b/src/lib.rs",
+                QueuePriority::DirtyRoot,
+            ),
+            probe(
+                "rust:c",
+                ProjectLanguage::Rust,
+                "c/src/lib.rs",
+                QueuePriority::BackgroundRefresh,
+            ),
+        ],
+    );
+
+    let state = provider_state.lock().unwrap();
+    assert_eq!(state.started_roots, vec!["rust:a"]);
+    assert_eq!(report.resolved_probe_count, 1);
+    assert_eq!(report.deferred_probe_count, 2);
+    assert_eq!(report.deferred.len(), 2);
+    assert!(report
+        .deferred
+        .iter()
+        .all(|deferred| deferred.reason == DeferredReason::MaxConcurrentRoots));
+}
+
+#[test]
+fn scheduler_reports_timeout_when_elapsed_time_exceeds_provider_budget() {
+    let clock = ManualClock::new(10);
+    let roots = vec![root("rust:core", "core", ProjectLanguage::Rust)];
+    let budget = ProviderBudget {
+        max_concurrent_roots: 1,
+        max_concurrent_resolves_per_root: 8,
+        single_symbol_timeout_ms: 25,
+        idle_shutdown_ms: 1_000,
+        max_memory_mb: 512,
+    };
+    let provider = FakeProvider::new(
+        "rust-analyzer-fake",
+        ProjectLanguage::Rust,
+        FakeBehavior::Ok,
+    )
+    .with_budget(budget)
+    .with_elapsed_ms(40);
+
+    let mut scheduler = SemanticScheduler::with_clock(Box::new(clock.clone()));
+    scheduler.register_provider(Box::new(TimedFakeProvider::new(provider, clock)));
+
+    let report = scheduler.resolve(
+        roots,
+        vec![probe(
+            "rust:core",
+            ProjectLanguage::Rust,
+            "core/src/lib.rs",
+            QueuePriority::CurrentQuery,
+        )],
+    );
+
+    assert_eq!(
+        report.root_state("rust:core"),
+        Some(&ProviderRootState::Partial)
+    );
+    assert_eq!(
+        report.partial_reasons("rust:core"),
+        vec![PartialReason::Timeout]
+    );
+    assert_eq!(report.facts.len(), 0);
+}
+
+#[test]
+fn idle_shutdown_uses_provider_budget_threshold() {
+    let clock = ManualClock::new(100);
+    let roots = vec![root("rust:core", "core", ProjectLanguage::Rust)];
+    let budget = ProviderBudget {
+        max_concurrent_roots: 1,
+        max_concurrent_resolves_per_root: 8,
+        single_symbol_timeout_ms: 25,
+        idle_shutdown_ms: 1_000,
+        max_memory_mb: 512,
+    };
+    let provider = FakeProvider::new(
+        "rust-analyzer-fake",
+        ProjectLanguage::Rust,
+        FakeBehavior::Ok,
+    )
+    .with_budget(budget);
+    let provider_state = provider.state();
+
+    let mut scheduler = SemanticScheduler::with_clock(Box::new(clock.clone()));
+    scheduler.register_provider(Box::new(provider));
+    let report = scheduler.resolve(
+        roots,
+        vec![probe(
+            "rust:core",
+            ProjectLanguage::Rust,
+            "core/src/lib.rs",
+            QueuePriority::CurrentQuery,
+        )],
+    );
+    assert_eq!(
+        report.root_state("rust:core"),
+        Some(&ProviderRootState::Ready)
+    );
+
+    clock.set(1_099);
+    assert_eq!(scheduler.shutdown_idle(), 0);
+    assert!(provider_state.lock().unwrap().shutdown_roots.is_empty());
+
+    clock.set(1_101);
+    assert_eq!(scheduler.shutdown_idle(), 1);
+    assert_eq!(
+        provider_state.lock().unwrap().shutdown_roots,
+        vec!["rust:core"]
+    );
 }

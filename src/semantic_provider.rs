@@ -8,8 +8,11 @@
 //!   root. Providers return normalized semantic facts only; public JSON
 //!   rendering, fallback behavior, freshness gates, and batch query UX remain in
 //!   CodeTrail core or later LCI tasks.
-//! - `SemanticScheduler` owns queue priority, request de-duplication, per-root
-//!   provider budgets, single-symbol timeout reporting, and idle shutdown.
+//! - `SemanticScheduler` owns queue priority, request de-duplication,
+//!   per-provider/per-root budgets, single-symbol timeout reporting, and idle
+//!   shutdown. Providers may also report partial work, but elapsed-time timeout
+//!   attribution is measured by the scheduler clock and surfaced with
+//!   `started_at_ms`/`elapsed_ms` on `SemanticPartial`.
 //! - Provider failures are root-scoped. A missing, failed, timed-out, or partial
 //!   provider marks only the affected root as partial/missing and does not fail
 //!   the whole workspace semantic index.
@@ -21,7 +24,10 @@
 //! - `starting | importing | resolving -> partial`
 //! - `partial -> retrying -> ready | partial`
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -229,6 +235,8 @@ pub struct SemanticPartial {
     pub provider_id: String,
     pub reason: PartialReason,
     pub message: String,
+    pub started_at_ms: Option<u64>,
+    pub elapsed_ms: Option<u64>,
     pub probe: Option<SemanticProbe>,
 }
 
@@ -261,10 +269,28 @@ impl SemanticBatchResult {
                     provider_id: session.provider_id.clone(),
                     reason: reason.clone(),
                     message: message.clone(),
+                    started_at_ms: None,
+                    elapsed_ms: None,
                     probe: Some(probe),
                 })
                 .collect(),
         }
+    }
+}
+
+pub trait SchedulerClock {
+    fn now_ms(&self) -> u64;
+}
+
+#[derive(Clone, Debug, Default)]
+struct SystemSchedulerClock;
+
+impl SchedulerClock for SystemSchedulerClock {
+    fn now_ms(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default()
     }
 }
 
@@ -296,6 +322,22 @@ pub struct ProviderRootReport {
     pub failures: Vec<ProviderFailure>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredReason {
+    MaxConcurrentRoots,
+    MaxConcurrentResolvesPerRoot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredSemanticWork {
+    pub root_id: String,
+    pub provider_id: String,
+    pub reason: DeferredReason,
+    pub probe_count: usize,
+}
+
 impl ProviderRootReport {
     fn new(root_id: &str) -> Self {
         Self {
@@ -321,6 +363,7 @@ impl ProviderRootReport {
 pub struct SemanticSchedulerReport {
     pub facts: Vec<NormalizedSemanticFact>,
     pub partial: Vec<SemanticPartial>,
+    pub deferred: Vec<DeferredSemanticWork>,
     pub root_reports: BTreeMap<String, ProviderRootReport>,
     pub resolved_probe_count: usize,
     pub deferred_probe_count: usize,
@@ -369,12 +412,33 @@ impl SemanticSchedulerReport {
             provider_id: failure.provider_id.clone(),
             reason: failure.reason.partial_reason(),
             message: failure.message.clone(),
+            started_at_ms: None,
+            elapsed_ms: None,
             probe: None,
         };
         self.root_report(&failure.root_id)
             .failures
             .push(failure.clone());
         self.add_partial(partial);
+    }
+
+    fn defer_probes(
+        &mut self,
+        root_id: String,
+        provider_id: String,
+        reason: DeferredReason,
+        probe_count: usize,
+    ) {
+        if probe_count == 0 {
+            return;
+        }
+        self.deferred_probe_count += probe_count;
+        self.deferred.push(DeferredSemanticWork {
+            root_id,
+            provider_id,
+            reason,
+            probe_count,
+        });
     }
 }
 
@@ -406,9 +470,24 @@ struct SessionKey {
     root_id: String,
 }
 
+#[derive(Clone, Debug)]
+struct ProviderSessionRecord {
+    session: ProviderSession,
+    budget: ProviderBudget,
+    last_used_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RootProbeGroup {
+    provider_id: String,
+    root_id: String,
+    probes: Vec<SemanticProbe>,
+}
+
 pub struct SemanticScheduler {
     providers: BTreeMap<ProviderKey, Box<dyn SemanticProvider>>,
-    sessions: BTreeMap<SessionKey, ProviderSession>,
+    sessions: BTreeMap<SessionKey, ProviderSessionRecord>,
+    clock: Box<dyn SchedulerClock>,
 }
 
 impl Default for SemanticScheduler {
@@ -416,11 +495,20 @@ impl Default for SemanticScheduler {
         Self {
             providers: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            clock: Box::<SystemSchedulerClock>::default(),
         }
     }
 }
 
 impl SemanticScheduler {
+    pub fn with_clock(clock: Box<dyn SchedulerClock>) -> Self {
+        Self {
+            providers: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            clock,
+        }
+    }
+
     pub fn register_provider(&mut self, provider: Box<dyn SemanticProvider>) {
         let key = ProviderKey {
             language: provider.language(),
@@ -442,7 +530,12 @@ impl SemanticScheduler {
         let queued = self.deduplicate_probes(probes, &mut report);
         let groups = group_queued_probes(queued);
 
-        for ((provider_id, root_id), probes) in groups {
+        let mut provider_root_counts = BTreeMap::<ProviderKey, usize>::new();
+
+        for group in groups {
+            let provider_id = group.provider_id;
+            let root_id = group.root_id;
+            let probes = group.probes;
             let Some(root) = roots_by_id.get(&root_id) else {
                 report.transition(&root_id, ProviderRootState::Missing);
                 report.add_partial(SemanticPartial {
@@ -450,6 +543,8 @@ impl SemanticScheduler {
                     provider_id,
                     reason: PartialReason::ProviderMissing,
                     message: "probe root is absent from project graph".to_string(),
+                    started_at_ms: None,
+                    elapsed_ms: None,
                     probe: None,
                 });
                 continue;
@@ -469,14 +564,36 @@ impl SemanticScheduler {
                     provider_id,
                     reason: PartialReason::ProviderMissing,
                     message: "semantic provider is not registered".to_string(),
+                    started_at_ms: None,
+                    elapsed_ms: None,
                     probe: None,
                 });
                 continue;
             };
+            let root_limit = budget.max_concurrent_roots.max(1);
+            let active_roots = provider_root_counts
+                .entry(provider_key.clone())
+                .or_default();
+            if *active_roots >= root_limit {
+                report.defer_probes(
+                    root_id,
+                    provider_id,
+                    DeferredReason::MaxConcurrentRoots,
+                    probes.len(),
+                );
+                continue;
+            }
+            *active_roots += 1;
+
             let resolve_limit = budget.max_concurrent_resolves_per_root.max(1);
             let active_count = probes.len().min(resolve_limit);
             let (active, deferred) = probes.split_at(active_count);
-            report.deferred_probe_count += deferred.len();
+            report.defer_probes(
+                root_id.clone(),
+                provider_id.clone(),
+                DeferredReason::MaxConcurrentResolvesPerRoot,
+                deferred.len(),
+            );
             if active.is_empty() {
                 continue;
             }
@@ -493,15 +610,43 @@ impl SemanticScheduler {
             };
 
             report.transition(&root_id, ProviderRootState::Resolving);
+            let started_at_ms = self.clock.now_ms();
             let batch = self
                 .providers
                 .get_mut(&provider_key)
                 .expect("provider existed before session start")
                 .resolve_batch(&session, active);
+            let finished_at_ms = self.clock.now_ms();
+            let elapsed_ms = finished_at_ms.saturating_sub(started_at_ms);
             report.resolved_probe_count += active.len();
-            report.facts.extend(batch.facts);
-            for partial in batch.partial {
-                report.add_partial(partial);
+            if elapsed_ms > budget.single_symbol_timeout_ms {
+                for probe in active.iter().cloned() {
+                    report.add_partial(SemanticPartial {
+                        root_id: root_id.clone(),
+                        provider_id: provider_id.clone(),
+                        reason: PartialReason::Timeout,
+                        message: format!(
+                            "semantic resolve exceeded single-symbol timeout budget ({}ms > {}ms)",
+                            elapsed_ms, budget.single_symbol_timeout_ms
+                        ),
+                        started_at_ms: Some(started_at_ms),
+                        elapsed_ms: Some(elapsed_ms),
+                        probe: Some(probe),
+                    });
+                }
+            } else {
+                report.facts.extend(batch.facts);
+                for mut partial in batch.partial {
+                    partial.started_at_ms.get_or_insert(started_at_ms);
+                    partial.elapsed_ms.get_or_insert(elapsed_ms);
+                    report.add_partial(partial);
+                }
+            }
+            if let Some(record) = self.sessions.get_mut(&SessionKey {
+                provider_id: provider_id.clone(),
+                root_id: root_id.clone(),
+            }) {
+                record.last_used_ms = finished_at_ms;
             }
             if report
                 .root_reports
@@ -551,6 +696,28 @@ impl SemanticScheduler {
         }
     }
 
+    pub fn shutdown_idle(&mut self) -> usize {
+        let now_ms = self.clock.now_ms();
+        let session_keys = self
+            .sessions
+            .iter()
+            .filter_map(|(session_key, record)| {
+                let idle_ms = now_ms.saturating_sub(record.last_used_ms);
+                (idle_ms >= record.budget.idle_shutdown_ms).then(|| session_key.clone())
+            })
+            .collect::<Vec<_>>();
+        let shutdown_count = session_keys.len();
+        for session_key in session_keys {
+            for provider in self.providers.values_mut() {
+                if provider.id() == session_key.provider_id {
+                    provider.shutdown_idle(&session_key.root_id);
+                }
+            }
+            self.sessions.remove(&session_key);
+        }
+        shutdown_count
+    }
+
     fn ensure_session(
         &mut self,
         root: &ProjectRoot,
@@ -564,8 +731,9 @@ impl SemanticScheduler {
             provider_id: provider_id.to_string(),
             root_id: root.id.clone(),
         };
-        if let Some(session) = self.sessions.get(&session_key) {
-            return Some(session.clone());
+        if let Some(record) = self.sessions.get_mut(&session_key) {
+            record.last_used_ms = self.clock.now_ms();
+            return Some(record.session.clone());
         }
 
         report.root_report(&root.id).provider_id = Some(provider_id.to_string());
@@ -593,7 +761,14 @@ impl SemanticScheduler {
                 report.transition(&root.id, ProviderRootState::Importing);
                 session.state = ProviderRootState::Ready;
                 report.transition(&root.id, ProviderRootState::Ready);
-                self.sessions.insert(session_key, session.clone());
+                self.sessions.insert(
+                    session_key,
+                    ProviderSessionRecord {
+                        session: session.clone(),
+                        budget: budget.clone(),
+                        last_used_ms: self.clock.now_ms(),
+                    },
+                );
                 Some(session)
             }
             Err(failure) => {
@@ -622,6 +797,8 @@ impl SemanticScheduler {
                         .unwrap_or_else(|| "unregistered".to_string()),
                     reason: PartialReason::ProviderMissing,
                     message: "semantic provider is not registered".to_string(),
+                    started_at_ms: None,
+                    elapsed_ms: None,
                     probe: None,
                 });
                 continue;
@@ -677,16 +854,24 @@ impl SemanticScheduler {
     }
 }
 
-fn group_queued_probes(queued: Vec<QueuedProbe>) -> BTreeMap<(String, String), Vec<SemanticProbe>> {
-    let mut groups = BTreeMap::<(String, String), Vec<SemanticProbe>>::new();
+fn group_queued_probes(queued: Vec<QueuedProbe>) -> Vec<RootProbeGroup> {
+    let mut group_indexes = BTreeMap::<(String, String), usize>::new();
+    let mut groups = Vec::<RootProbeGroup>::new();
     for queued_probe in queued {
-        groups
-            .entry((
-                queued_probe.provider_id.clone(),
-                queued_probe.probe.root_id.clone(),
-            ))
-            .or_default()
-            .push(queued_probe.probe);
+        let key = (
+            queued_probe.provider_id.clone(),
+            queued_probe.probe.root_id.clone(),
+        );
+        if let Some(index) = group_indexes.get(&key) {
+            groups[*index].probes.push(queued_probe.probe);
+        } else {
+            group_indexes.insert(key, groups.len());
+            groups.push(RootProbeGroup {
+                provider_id: queued_probe.provider_id,
+                root_id: queued_probe.probe.root_id.clone(),
+                probes: vec![queued_probe.probe],
+            });
+        }
     }
     groups
 }
