@@ -9,6 +9,7 @@ pub mod lancedb_store;
 pub mod output;
 pub mod project_graph;
 pub mod remote;
+pub mod rust_provider;
 pub mod saved_query;
 pub mod scip;
 pub mod scip_index;
