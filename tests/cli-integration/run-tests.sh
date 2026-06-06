@@ -101,7 +101,7 @@ RSEARCH_go_gin="Context";   RSEARCH_rust_ripgrep="RegexBuilder"; RSEARCH_java_ju
 RSYMBOL_go_gin="Engine";    RSYMBOL_rust_ripgrep="RegexBuilder"; RSYMBOL_java_junit4="Test"; RSYMBOL_ts_express="application"
 RFILE_go_gin="context.go";  RFILE_rust_ripgrep="lib.rs";  RFILE_java_junit4="Assert.java"; RFILE_ts_express="application.js"
 RGLOB_go_gin="**/*.go";     RGLOB_rust_ripgrep="**/*.rs"; RGLOB_java_junit4="**/*.java"; RGLOB_ts_express="**/*.js"
-RGREP_go_gin="func ";       RGREP_rust_ripgrep="fn ";   RGREP_java_junit4="public class"; RGREP_ts_express="function "
+RGREP_go_gin="func ";       RGREP_rust_ripgrep="fn ";   RGREP_java_junit4="class "; RGREP_ts_express="function "
 
 get_lang()   { eval echo \$RLANG_${1//-/_}; }
 get_search() { eval echo \$RSEARCH_${1//-/_}; }
