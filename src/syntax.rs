@@ -73,6 +73,9 @@ static LANGUAGE_CANDIDATE_MATRIX: [LanguageCandidateMatrix; 6] = [
             "trait method dispatch",
             "cfg-gated code",
             "re-export and glob import binding",
+            "generic struct type names (e.g. RegexBuilder<T>)",
+            "impl block item extraction for non-trait methods",
+            "proc-macro generated symbols",
         ],
     },
     LanguageCandidateMatrix {
@@ -93,6 +96,9 @@ static LANGUAGE_CANDIDATE_MATRIX: [LanguageCandidateMatrix; 6] = [
             "type-only imports and path aliases",
             "decorator and framework injection",
             "JSX generated calls",
+            "non-exported module members (module.exports / exports.xxx)",
+            "bundled or minified code without source maps",
+            "CommonJS require() patterns",
         ],
     },
     LanguageCandidateMatrix {
