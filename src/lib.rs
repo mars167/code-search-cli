@@ -11,6 +11,7 @@ pub mod scip;
 pub mod scip_index;
 pub mod scip_proto;
 pub mod search;
+pub mod semantic_facts;
 pub mod semantic_provider;
 pub mod snapshot_store;
 pub mod syntax;
