@@ -140,6 +140,24 @@ impl LanceDbStore {
             .with_context(|| "failed to create parser_facts table")?;
         }
 
+        if !existing.iter().any(|t| t == "config_facts") {
+            block_on(
+                self.db
+                    .create_empty_table("config_facts", config_facts_schema())
+                    .execute(),
+            )
+            .with_context(|| "failed to create config_facts table")?;
+        }
+
+        if !existing.iter().any(|t| t == "config_dependency_edges") {
+            block_on(
+                self.db
+                    .create_empty_table("config_dependency_edges", config_dependency_edges_schema())
+                    .execute(),
+            )
+            .with_context(|| "failed to create config_dependency_edges table")?;
+        }
+
         if !existing.iter().any(|t| t == "call_graph") {
             block_on(
                 self.db
@@ -911,6 +929,46 @@ fn parser_facts_schema() -> SchemaRef {
     ]))
 }
 
+fn config_facts_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("snapshot_id", DataType::Utf8, false),
+        Field::new("file_path", DataType::Utf8, false),
+        Field::new("fact_kind", DataType::Utf8, false),
+        Field::new("key_path", DataType::Utf8, true),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("value_preview", DataType::Utf8, true),
+        Field::new("preview_masked", DataType::Boolean, false),
+        Field::new("producer", DataType::Utf8, false),
+        Field::new("reliability", DataType::Utf8, false),
+        Field::new("affected_root_ids", DataType::Utf8, false),
+        Field::new("dependency_edge_kind", DataType::Utf8, true),
+        Field::new("dependency_edge_refs", DataType::Utf8, false),
+        Field::new("caveats", DataType::Utf8, false),
+        Field::new("range_start_line", DataType::UInt32, false),
+        Field::new("range_start_col", DataType::UInt32, false),
+        Field::new("range_end_line", DataType::UInt32, false),
+        Field::new("range_end_col", DataType::UInt32, false),
+        Field::new("file_hash", DataType::Utf8, false),
+        Field::new("cached_at_epoch_ms", DataType::UInt64, false),
+    ]))
+}
+
+fn config_dependency_edges_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("snapshot_id", DataType::Utf8, false),
+        Field::new("file_path", DataType::Utf8, false),
+        Field::new("edge_schema", DataType::Utf8, false),
+        Field::new("edge_kind", DataType::Utf8, false),
+        Field::new("from_root_id", DataType::Utf8, true),
+        Field::new("to_root_id", DataType::Utf8, true),
+        Field::new("via_path", DataType::Utf8, true),
+        Field::new("unresolved", DataType::Boolean, false),
+        Field::new("producer", DataType::Utf8, false),
+        Field::new("caveats", DataType::Utf8, false),
+        Field::new("cached_at_epoch_ms", DataType::UInt64, false),
+    ]))
+}
+
 fn call_graph_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("snapshot_id", DataType::Utf8, false),
@@ -1009,6 +1067,8 @@ mod tests {
         assert!(existing.iter().any(|t| t == "gram_postings"));
         assert!(existing.iter().any(|t| t == "scip_occurrences"));
         assert!(existing.iter().any(|t| t == "parser_facts"));
+        assert!(existing.iter().any(|t| t == "config_facts"));
+        assert!(existing.iter().any(|t| t == "config_dependency_edges"));
         assert!(existing.iter().any(|t| t == "call_graph"));
     }
 
