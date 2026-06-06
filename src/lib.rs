@@ -19,6 +19,7 @@ pub mod semantic_provider;
 pub mod snapshot_store;
 pub mod syntax;
 pub mod text_index;
+pub mod ts_provider;
 pub mod watcher;
 pub mod workspace;
 
