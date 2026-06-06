@@ -653,3 +653,94 @@ fn idle_shutdown_uses_provider_budget_threshold() {
         vec!["rust:core"]
     );
 }
+
+#[test]
+fn warm_session_report_keeps_provider_and_ready_state_history() {
+    let roots = vec![root("rust:core", "core", ProjectLanguage::Rust)];
+    let provider = FakeProvider::new("shared-id", ProjectLanguage::Rust, FakeBehavior::Ok);
+    let provider_state = provider.state();
+
+    let mut scheduler = SemanticScheduler::default();
+    scheduler.register_provider(Box::new(provider));
+    let first = scheduler.resolve(
+        roots.clone(),
+        vec![probe(
+            "rust:core",
+            ProjectLanguage::Rust,
+            "core/src/lib.rs",
+            QueuePriority::CurrentQuery,
+        )],
+    );
+    assert_eq!(
+        first.root_state("rust:core"),
+        Some(&ProviderRootState::Ready)
+    );
+
+    let second = scheduler.resolve(
+        roots,
+        vec![probe(
+            "rust:core",
+            ProjectLanguage::Rust,
+            "core/src/main.rs",
+            QueuePriority::CurrentQuery,
+        )],
+    );
+
+    let report = second.root_reports.get("rust:core").unwrap();
+    assert_eq!(report.provider_id.as_deref(), Some("shared-id"));
+    assert_eq!(
+        report.state_history,
+        vec![
+            ProviderRootState::Ready,
+            ProviderRootState::Resolving,
+            ProviderRootState::Ready,
+        ]
+    );
+    assert_eq!(
+        provider_state.lock().unwrap().started_roots,
+        vec!["rust:core"]
+    );
+}
+
+#[test]
+fn idle_shutdown_uses_language_and_provider_id_for_exact_provider() {
+    let clock = ManualClock::new(100);
+    let budget = ProviderBudget {
+        max_concurrent_roots: 1,
+        max_concurrent_resolves_per_root: 8,
+        single_symbol_timeout_ms: 25,
+        idle_shutdown_ms: 1_000,
+        max_memory_mb: 512,
+    };
+    let go_provider = FakeProvider::new("shared-id", ProjectLanguage::Go, FakeBehavior::Ok)
+        .with_budget(budget.clone());
+    let go_state = go_provider.state();
+    let rust_provider =
+        FakeProvider::new("shared-id", ProjectLanguage::Rust, FakeBehavior::Ok).with_budget(budget);
+    let rust_state = rust_provider.state();
+
+    let mut scheduler = SemanticScheduler::with_clock(Box::new(clock.clone()));
+    scheduler.register_provider(Box::new(go_provider));
+    scheduler.register_provider(Box::new(rust_provider));
+    let report = scheduler.resolve(
+        vec![
+            root("go:api", "api", ProjectLanguage::Go),
+            root("rust:core", "core", ProjectLanguage::Rust),
+        ],
+        vec![probe(
+            "rust:core",
+            ProjectLanguage::Rust,
+            "core/src/lib.rs",
+            QueuePriority::CurrentQuery,
+        )],
+    );
+    assert_eq!(
+        report.root_state("rust:core"),
+        Some(&ProviderRootState::Ready)
+    );
+
+    clock.set(1_101);
+    assert_eq!(scheduler.shutdown_idle(), 1);
+    assert!(go_state.lock().unwrap().shutdown_roots.is_empty());
+    assert_eq!(rust_state.lock().unwrap().shutdown_roots, vec!["rust:core"]);
+}

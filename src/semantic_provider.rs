@@ -473,6 +473,7 @@ struct SessionKey {
 #[derive(Clone, Debug)]
 struct ProviderSessionRecord {
     session: ProviderSession,
+    provider_key: ProviderKey,
     budget: ProviderBudget,
     last_used_ms: u64,
 }
@@ -686,12 +687,12 @@ impl SemanticScheduler {
                 .cloned()
                 .collect::<Vec<_>>();
             for session_key in session_keys {
-                for provider in self.providers.values_mut() {
-                    if provider.id() == session_key.provider_id {
-                        provider.shutdown_idle(root_id);
-                    }
+                let Some(record) = self.sessions.remove(&session_key) else {
+                    continue;
+                };
+                if let Some(provider) = self.providers.get_mut(&record.provider_key) {
+                    provider.shutdown_idle(root_id);
                 }
-                self.sessions.remove(&session_key);
             }
         }
     }
@@ -708,12 +709,12 @@ impl SemanticScheduler {
             .collect::<Vec<_>>();
         let shutdown_count = session_keys.len();
         for session_key in session_keys {
-            for provider in self.providers.values_mut() {
-                if provider.id() == session_key.provider_id {
-                    provider.shutdown_idle(&session_key.root_id);
-                }
+            let Some(record) = self.sessions.remove(&session_key) else {
+                continue;
+            };
+            if let Some(provider) = self.providers.get_mut(&record.provider_key) {
+                provider.shutdown_idle(&session_key.root_id);
             }
-            self.sessions.remove(&session_key);
         }
         shutdown_count
     }
@@ -732,6 +733,9 @@ impl SemanticScheduler {
             root_id: root.id.clone(),
         };
         if let Some(record) = self.sessions.get_mut(&session_key) {
+            let root_report = report.root_report(&root.id);
+            root_report.provider_id = Some(provider_id.to_string());
+            root_report.transition(ProviderRootState::Ready);
             record.last_used_ms = self.clock.now_ms();
             return Some(record.session.clone());
         }
@@ -765,6 +769,7 @@ impl SemanticScheduler {
                     session_key,
                     ProviderSessionRecord {
                         session: session.clone(),
+                        provider_key: provider_key.clone(),
                         budget: budget.clone(),
                         last_used_ms: self.clock.now_ms(),
                     },
