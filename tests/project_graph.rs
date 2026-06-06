@@ -130,6 +130,80 @@ fn maps_root_and_shared_config_edges_to_affected_roots() {
 }
 
 #[test]
+fn same_directory_polyglot_build_configs_keep_language_specific_owners() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("api/go.mod"), "module api\n");
+    write(
+        &dir.path().join("api/go.sum"),
+        "example.com/lib v1.0.0 h1:abc\n",
+    );
+    write(&dir.path().join("api/main.go"), "package main\n");
+    write(&dir.path().join("api/package.json"), "{}\n");
+    write(&dir.path().join("api/package-lock.json"), "{}\n");
+    write(
+        &dir.path().join("api/src/app.ts"),
+        "export const app = 1;\n",
+    );
+
+    let graph = discover_project_graph(dir.path()).unwrap();
+
+    let go_mod = graph
+        .config_edges
+        .iter()
+        .find(|edge| edge.path == "api/go.mod")
+        .unwrap();
+    assert_eq!(go_mod.kind, ConfigEdgeKind::BuildConfig);
+    assert_eq!(go_mod.owner_root_id.as_deref(), Some("go:api"));
+    assert_eq!(go_mod.affected_root_ids, vec!["go:api"]);
+
+    let package_json = graph
+        .config_edges
+        .iter()
+        .find(|edge| edge.path == "api/package.json")
+        .unwrap();
+    assert_eq!(package_json.kind, ConfigEdgeKind::BuildConfig);
+    assert_eq!(
+        package_json.owner_root_id.as_deref(),
+        Some("typescript:api")
+    );
+    assert_eq!(package_json.affected_root_ids, vec!["typescript:api"]);
+
+    let go_sum = graph
+        .config_edges
+        .iter()
+        .find(|edge| edge.path == "api/go.sum")
+        .unwrap();
+    assert_eq!(go_sum.kind, ConfigEdgeKind::DependencyConfig);
+    assert_eq!(go_sum.owner_root_id.as_deref(), Some("go:api"));
+    assert_eq!(go_sum.affected_root_ids, vec!["go:api"]);
+
+    let package_lock = graph
+        .config_edges
+        .iter()
+        .find(|edge| edge.path == "api/package-lock.json")
+        .unwrap();
+    assert_eq!(package_lock.kind, ConfigEdgeKind::DependencyConfig);
+    assert_eq!(
+        package_lock.owner_root_id.as_deref(),
+        Some("typescript:api")
+    );
+    assert_eq!(package_lock.affected_root_ids, vec!["typescript:api"]);
+
+    assert!(graph
+        .dependency_edges
+        .iter()
+        .any(|edge| edge.via_path.as_deref() == Some("api/go.mod")
+            && edge.from_root_id.as_deref() == Some("go:api")
+            && edge.to_root_id.as_deref() == Some("go:api")));
+    assert!(graph
+        .dependency_edges
+        .iter()
+        .any(|edge| edge.via_path.as_deref() == Some("api/package.json")
+            && edge.from_root_id.as_deref() == Some("typescript:api")
+            && edge.to_root_id.as_deref() == Some("typescript:api")));
+}
+
+#[test]
 fn shared_config_and_environment_files_affect_multiple_roots() {
     let dir = tempdir().unwrap();
     write(&dir.path().join("api/go.mod"), "module api\n");
@@ -145,6 +219,10 @@ fn shared_config_and_environment_files_affect_multiple_roots() {
     write(&dir.path().join("package-lock.json"), "{}\n");
     write(&dir.path().join("config/app.yaml"), "env: test\n");
     write(&dir.path().join("compose.yaml"), "services: {}\n");
+    write(
+        &dir.path().join("k8s/deployment.yaml"),
+        "apiVersion: apps/v1\n",
+    );
 
     let graph = discover_project_graph(dir.path()).unwrap();
 
@@ -166,6 +244,14 @@ fn shared_config_and_environment_files_affect_multiple_roots() {
     assert_eq!(compose.kind, EnvironmentEdgeKind::Compose);
     assert_eq!(compose.affected_root_ids, vec!["go:api", "rust:worker"]);
     assert_eq!(compose.unresolved, false);
+
+    let k8s = graph
+        .environment_edges
+        .iter()
+        .find(|edge| edge.path == "k8s/deployment.yaml")
+        .unwrap();
+    assert_eq!(k8s.kind, EnvironmentEdgeKind::Kubernetes);
+    assert_eq!(k8s.affected_root_ids, vec!["go:api", "rust:worker"]);
 }
 
 #[test]

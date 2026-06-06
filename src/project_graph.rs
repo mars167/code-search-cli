@@ -501,6 +501,7 @@ fn config_edge_kind(path: &str) -> Option<ConfigEdgeKind> {
 fn environment_edge_kind(path: &str) -> Option<EnvironmentEdgeKind> {
     let name = file_name(path);
     let lower = path.to_ascii_lowercase();
+    let first_component = first_component(&lower);
     if name == "Dockerfile" || name.starts_with("Dockerfile.") {
         Some(EnvironmentEdgeKind::Container)
     } else if lower.ends_with("docker-compose.yml")
@@ -511,7 +512,10 @@ fn environment_edge_kind(path: &str) -> Option<EnvironmentEdgeKind> {
         Some(EnvironmentEdgeKind::Compose)
     } else if name == ".env" || name.starts_with(".env.") {
         Some(EnvironmentEdgeKind::DotEnv)
-    } else if lower.contains("/k8s/") || lower.contains("/kubernetes/") {
+    } else if matches!(first_component, Some("k8s" | "kubernetes"))
+        || lower.contains("/k8s/")
+        || lower.contains("/kubernetes/")
+    {
         Some(EnvironmentEdgeKind::Kubernetes)
     } else {
         None
@@ -561,9 +565,17 @@ fn affected_roots_for_config(
     roots: &[ProjectRoot],
 ) -> (Option<String>, Vec<String>, bool) {
     match kind {
-        ConfigEdgeKind::BuildConfig
-        | ConfigEdgeKind::RuntimeConfig
-        | ConfigEdgeKind::DependencyConfig => {
+        ConfigEdgeKind::BuildConfig => {
+            if let Some(root) = root_for_build_config(path, roots) {
+                (Some(root.id.clone()), vec![root.id.clone()], false)
+            } else if shared_config_path(path) && !roots.is_empty() {
+                (None, all_root_ids(roots), false)
+            } else {
+                (None, Vec::new(), true)
+            }
+        }
+        ConfigEdgeKind::DependencyConfig => affected_roots_for_dependency_config(path, roots),
+        ConfigEdgeKind::RuntimeConfig => {
             if root_marker(path).is_none() && shared_config_path(path) && !roots.is_empty() {
                 return (None, all_root_ids(roots), false);
             }
@@ -589,6 +601,94 @@ fn affected_roots_for_config(
             (None, affected, unresolved)
         }
     }
+}
+
+fn root_for_build_config<'a>(path: &str, roots: &'a [ProjectRoot]) -> Option<&'a ProjectRoot> {
+    let (kind, marker_dir) = root_marker(path)?;
+    let language = kind.language();
+    roots.iter().find(|root| {
+        root.path == marker_dir
+            && root.language == language
+            && root.markers.iter().any(|m| m == path)
+    })
+}
+
+fn affected_roots_for_dependency_config(
+    path: &str,
+    roots: &[ProjectRoot],
+) -> (Option<String>, Vec<String>, bool) {
+    if let Some(language) = dependency_config_language(path) {
+        let matching = matching_language_roots(path, &language, roots);
+        if !matching.is_empty() {
+            let owner_root_id = if matching.len() == 1 {
+                Some(matching[0].clone())
+            } else {
+                None
+            };
+            return (owner_root_id, matching, false);
+        }
+    }
+
+    if shared_config_path(path) && !roots.is_empty() {
+        return (None, all_root_ids(roots), false);
+    }
+
+    if let Some(root) = nearest_root(path, roots) {
+        (Some(root.id.clone()), vec![root.id.clone()], false)
+    } else {
+        (None, Vec::new(), true)
+    }
+}
+
+fn dependency_config_language(path: &str) -> Option<ProjectLanguage> {
+    match file_name(path) {
+        "go.sum" => Some(ProjectLanguage::Go),
+        "Cargo.lock" => Some(ProjectLanguage::Rust),
+        "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" => Some(ProjectLanguage::TypeScript),
+        "gradle.lockfile" => Some(ProjectLanguage::Java),
+        _ => None,
+    }
+}
+
+fn matching_language_roots(
+    path: &str,
+    language: &ProjectLanguage,
+    roots: &[ProjectRoot],
+) -> Vec<String> {
+    let parent = parent_dir(path);
+    let exact = roots
+        .iter()
+        .filter(|root| root.path == parent && &root.language == language)
+        .map(|root| root.id.clone())
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return exact;
+    }
+
+    let nearest_len = roots
+        .iter()
+        .filter(|root| &root.language == language && path_under_root(path, &root.path))
+        .map(|root| root.path.len())
+        .max();
+    let Some(nearest_len) = nearest_len else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .filter(|root| {
+            &root.language == language
+                && root.path.len() == nearest_len
+                && path_under_root(path, &root.path)
+        })
+        .map(|root| root.id.clone())
+        .collect()
+}
+
+fn nearest_root<'a>(path: &str, roots: &'a [ProjectRoot]) -> Option<&'a ProjectRoot> {
+    roots
+        .iter()
+        .filter(|root| path_under_root(path, &root.path))
+        .max_by_key(|root| root.path.len())
 }
 
 fn config_dependency_edges(
