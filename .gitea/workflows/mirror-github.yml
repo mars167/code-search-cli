@@ -10,7 +10,7 @@ on:
 
 concurrency:
   group: mirror-github-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   mirror:
