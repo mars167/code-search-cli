@@ -1,8 +1,8 @@
 use std::fs;
 
 use codetrail::project_graph::{
-    discover_project_graph, ConfigEdgeKind, ProjectGraphCaveatCode, ProjectRootKind,
-    SemanticFactPolicy,
+    discover_project_graph, ConfigEdgeKind, DependencyEdgeKind, EnvironmentEdgeKind,
+    ProjectGraphCaveatCode, ProjectRootKind, SemanticFactPolicy,
 };
 use tempfile::tempdir;
 
@@ -130,6 +130,93 @@ fn maps_root_and_shared_config_edges_to_affected_roots() {
 }
 
 #[test]
+fn shared_config_and_environment_files_affect_multiple_roots() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("api/go.mod"), "module api\n");
+    write(&dir.path().join("api/main.go"), "package main\n");
+    write(
+        &dir.path().join("worker/Cargo.toml"),
+        "[package]\nname = \"worker\"\n",
+    );
+    write(
+        &dir.path().join("worker/src/lib.rs"),
+        "pub fn worker() {}\n",
+    );
+    write(&dir.path().join("package-lock.json"), "{}\n");
+    write(&dir.path().join("config/app.yaml"), "env: test\n");
+    write(&dir.path().join("compose.yaml"), "services: {}\n");
+
+    let graph = discover_project_graph(dir.path()).unwrap();
+
+    for path in ["package-lock.json", "config/app.yaml"] {
+        let edge = graph
+            .config_edges
+            .iter()
+            .find(|edge| edge.path == path)
+            .unwrap();
+        assert_eq!(edge.affected_root_ids, vec!["go:api", "rust:worker"]);
+        assert_eq!(edge.unresolved, false);
+    }
+
+    let compose = graph
+        .environment_edges
+        .iter()
+        .find(|edge| edge.path == "compose.yaml")
+        .unwrap();
+    assert_eq!(compose.kind, EnvironmentEdgeKind::Compose);
+    assert_eq!(compose.affected_root_ids, vec!["go:api", "rust:worker"]);
+    assert_eq!(compose.unresolved, false);
+}
+
+#[test]
+fn exposes_dependency_edges_for_config_environment_and_root_relationships() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("go.work"), "use ./api\n");
+    write(&dir.path().join("api/go.mod"), "module api\n");
+    write(&dir.path().join("api/main.go"), "package main\n");
+    write(
+        &dir.path().join("worker/Cargo.toml"),
+        "[package]\nname = \"worker\"\n",
+    );
+    write(
+        &dir.path().join("worker/src/lib.rs"),
+        "pub fn worker() {}\n",
+    );
+    write(&dir.path().join("package-lock.json"), "{}\n");
+    write(&dir.path().join("compose.yaml"), "services: {}\n");
+
+    let graph = discover_project_graph(dir.path()).unwrap();
+
+    let lock_edges = graph
+        .dependency_edges
+        .iter()
+        .filter(|edge| edge.via_path.as_deref() == Some("package-lock.json"))
+        .collect::<Vec<_>>();
+    assert_eq!(lock_edges.len(), 3);
+    assert!(lock_edges.iter().all(|edge| edge.kind
+        == DependencyEdgeKind::DependencyConfigAffectsRoot
+        && edge.from_root_id.is_none()
+        && edge.to_root_id.is_some()
+        && edge.unresolved == false));
+
+    let compose_edges = graph
+        .dependency_edges
+        .iter()
+        .filter(|edge| edge.via_path.as_deref() == Some("compose.yaml"))
+        .collect::<Vec<_>>();
+    assert_eq!(compose_edges.len(), 3);
+    assert!(compose_edges
+        .iter()
+        .all(|edge| edge.kind == DependencyEdgeKind::EnvironmentAffectsRoot));
+
+    assert!(graph.dependency_edges.iter().any(|edge| edge.kind
+        == DependencyEdgeKind::RootDependsOnRoot
+        && edge.from_root_id.as_deref() == Some("go:.")
+        && edge.to_root_id.as_deref() == Some("go:api")
+        && edge.via_path.as_deref() == Some("go.work")));
+}
+
+#[test]
 fn records_generated_sources_as_source_facts_not_precise_semantic_facts() {
     let dir = tempdir().unwrap();
     write(
@@ -198,4 +285,8 @@ fn serializes_machine_readable_schema_snapshot() {
         "precise_eligible"
     );
     assert_eq!(json["configEdges"][0]["edgeSchema"], "config_edge/v1");
+    assert_eq!(
+        json["dependencyEdges"][0]["edgeSchema"],
+        "dependency_edge/v1"
+    );
 }

@@ -20,6 +20,9 @@
 //!   dependency config files. A config/script may affect multiple roots.
 //! - `EnvironmentEdge` records shared environment-sensitive files such as
 //!   Docker, compose, Kubernetes, and dotenv files.
+//! - `DependencyEdge` is the machine-readable invalidation/import edge layer.
+//!   It records config/environment-to-root influence and root-to-root
+//!   relationships without requiring semantic providers to parse manifests yet.
 //! - Unmapped config/script files keep an empty `affectedRootIds` list,
 //!   `unresolved = true`, and a `config_edge_unresolved` caveat so freshness
 //!   consumers can make a machine-readable conservative choice.
@@ -48,6 +51,7 @@ pub struct ProjectGraph {
     pub generated_sources: Vec<GeneratedSource>,
     pub config_edges: Vec<ConfigEdge>,
     pub environment_edges: Vec<EnvironmentEdge>,
+    pub dependency_edges: Vec<DependencyEdge>,
     pub caveats: Vec<ProjectGraphCaveat>,
 }
 
@@ -208,6 +212,28 @@ pub enum EnvironmentEdgeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DependencyEdge {
+    pub edge_schema: String,
+    pub kind: DependencyEdgeKind,
+    pub from_root_id: Option<String>,
+    pub to_root_id: Option<String>,
+    pub via_path: Option<String>,
+    pub unresolved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyEdgeKind {
+    BuildConfigAffectsRoot,
+    RuntimeConfigAffectsRoot,
+    AutomationAffectsRoot,
+    DependencyConfigAffectsRoot,
+    EnvironmentAffectsRoot,
+    RootDependsOnRoot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectGraphCaveat {
     pub code: ProjectGraphCaveatCode,
     pub path: String,
@@ -234,7 +260,8 @@ pub fn discover_project_graph(workspace_root: impl AsRef<Path>) -> Result<Projec
     let files = workspace_files(workspace_root)?;
     let roots = discover_roots(&files);
     let (source_owners, generated_sources) = discover_sources(&files, &roots);
-    let (config_edges, environment_edges, caveats) = discover_edges(&files, &roots);
+    let (config_edges, environment_edges, dependency_edges, caveats) =
+        discover_edges(&files, &roots);
 
     Ok(ProjectGraph {
         schema_version: ProjectGraph::CURRENT_SCHEMA_VERSION,
@@ -243,6 +270,7 @@ pub fn discover_project_graph(workspace_root: impl AsRef<Path>) -> Result<Projec
         generated_sources,
         config_edges,
         environment_edges,
+        dependency_edges,
         caveats,
     })
 }
@@ -359,10 +387,12 @@ fn discover_edges(
 ) -> (
     Vec<ConfigEdge>,
     Vec<EnvironmentEdge>,
+    Vec<DependencyEdge>,
     Vec<ProjectGraphCaveat>,
 ) {
     let mut config_edges = Vec::new();
     let mut environment_edges = Vec::new();
+    let mut dependency_edges = Vec::new();
     let mut caveats = Vec::new();
 
     for file in files {
@@ -375,12 +405,19 @@ fn discover_edges(
             config_edges.push(ConfigEdge {
                 edge_schema: "config_edge/v1".to_string(),
                 path: file.clone(),
-                kind,
-                owner_root_id,
-                affected_root_ids,
+                kind: kind.clone(),
+                owner_root_id: owner_root_id.clone(),
+                affected_root_ids: affected_root_ids.clone(),
                 unresolved,
                 semantic_fact_policy: SemanticFactPolicy::SourceOrConfigFactOnly,
             });
+            dependency_edges.extend(config_dependency_edges(
+                file,
+                &kind,
+                owner_root_id,
+                &affected_root_ids,
+                unresolved,
+            ));
         }
 
         if let Some(kind) = environment_edge_kind(file) {
@@ -393,16 +430,39 @@ fn discover_edges(
                 edge_schema: "environment_edge/v1".to_string(),
                 path: file.clone(),
                 kind,
-                affected_root_ids,
+                affected_root_ids: affected_root_ids.clone(),
                 unresolved,
             });
+            dependency_edges.extend(affected_root_ids.iter().map(|root_id| DependencyEdge {
+                edge_schema: "dependency_edge/v1".to_string(),
+                kind: DependencyEdgeKind::EnvironmentAffectsRoot,
+                from_root_id: None,
+                to_root_id: Some(root_id.clone()),
+                via_path: Some(file.clone()),
+                unresolved,
+            }));
+            if unresolved {
+                dependency_edges.push(unresolved_dependency_edge(
+                    DependencyEdgeKind::EnvironmentAffectsRoot,
+                    file,
+                ));
+            }
         }
+
+        dependency_edges.extend(root_dependency_edges(file, roots));
     }
 
     config_edges.sort_by(|left, right| left.path.cmp(&right.path));
     environment_edges.sort_by(|left, right| left.path.cmp(&right.path));
+    dependency_edges.sort_by(|left, right| {
+        left.via_path
+            .cmp(&right.via_path)
+            .then_with(|| left.from_root_id.cmp(&right.from_root_id))
+            .then_with(|| left.to_root_id.cmp(&right.to_root_id))
+            .then_with(|| format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
+    });
     caveats.sort_by(|left, right| left.path.cmp(&right.path));
-    (config_edges, environment_edges, caveats)
+    (config_edges, environment_edges, dependency_edges, caveats)
 }
 
 fn root_marker(path: &str) -> Option<(ProjectRootKind, String)> {
@@ -504,12 +564,21 @@ fn affected_roots_for_config(
         ConfigEdgeKind::BuildConfig
         | ConfigEdgeKind::RuntimeConfig
         | ConfigEdgeKind::DependencyConfig => {
+            if root_marker(path).is_none() && shared_config_path(path) && !roots.is_empty() {
+                return (None, all_root_ids(roots), false);
+            }
             if let Some(root) = roots
                 .iter()
                 .filter(|root| path_under_root(path, &root.path))
                 .max_by_key(|root| root.path.len())
             {
-                (Some(root.id.clone()), vec![root.id.clone()], false)
+                if shared_config_path(path) {
+                    (Some(root.id.clone()), all_root_ids(roots), false)
+                } else {
+                    (Some(root.id.clone()), vec![root.id.clone()], false)
+                }
+            } else if shared_config_path(path) && !roots.is_empty() {
+                (None, all_root_ids(roots), false)
             } else {
                 (None, Vec::new(), true)
             }
@@ -522,8 +591,88 @@ fn affected_roots_for_config(
     }
 }
 
+fn config_dependency_edges(
+    path: &str,
+    kind: &ConfigEdgeKind,
+    owner_root_id: Option<String>,
+    affected_root_ids: &[String],
+    unresolved: bool,
+) -> Vec<DependencyEdge> {
+    let dependency_kind = match kind {
+        ConfigEdgeKind::BuildConfig => DependencyEdgeKind::BuildConfigAffectsRoot,
+        ConfigEdgeKind::RuntimeConfig => DependencyEdgeKind::RuntimeConfigAffectsRoot,
+        ConfigEdgeKind::AutomationScript => DependencyEdgeKind::AutomationAffectsRoot,
+        ConfigEdgeKind::DependencyConfig => DependencyEdgeKind::DependencyConfigAffectsRoot,
+    };
+
+    let mut edges = affected_root_ids
+        .iter()
+        .map(|root_id| DependencyEdge {
+            edge_schema: "dependency_edge/v1".to_string(),
+            kind: dependency_kind.clone(),
+            from_root_id: owner_root_id.clone(),
+            to_root_id: Some(root_id.clone()),
+            via_path: Some(path.to_string()),
+            unresolved,
+        })
+        .collect::<Vec<_>>();
+
+    if unresolved {
+        edges.push(unresolved_dependency_edge(dependency_kind, path));
+    }
+    edges
+}
+
+fn root_dependency_edges(path: &str, roots: &[ProjectRoot]) -> Vec<DependencyEdge> {
+    let Some((kind, marker_dir)) = root_marker(path) else {
+        return Vec::new();
+    };
+    if !matches!(kind, ProjectRootKind::GoWorkspace) {
+        return Vec::new();
+    }
+    let Some(source_root) = roots
+        .iter()
+        .find(|root| root.path == marker_dir && root.language == ProjectLanguage::Go)
+    else {
+        return Vec::new();
+    };
+
+    roots
+        .iter()
+        .filter(|root| {
+            root.language == ProjectLanguage::Go
+                && root.id != source_root.id
+                && path_under_root(&root.path, &source_root.path)
+        })
+        .map(|root| DependencyEdge {
+            edge_schema: "dependency_edge/v1".to_string(),
+            kind: DependencyEdgeKind::RootDependsOnRoot,
+            from_root_id: Some(source_root.id.clone()),
+            to_root_id: Some(root.id.clone()),
+            via_path: Some(path.to_string()),
+            unresolved: false,
+        })
+        .collect()
+}
+
+fn unresolved_dependency_edge(kind: DependencyEdgeKind, path: &str) -> DependencyEdge {
+    DependencyEdge {
+        edge_schema: "dependency_edge/v1".to_string(),
+        kind,
+        from_root_id: None,
+        to_root_id: None,
+        via_path: Some(path.to_string()),
+        unresolved: true,
+    }
+}
+
 fn all_root_ids(roots: &[ProjectRoot]) -> Vec<String> {
     roots.iter().map(|root| root.id.clone()).collect()
+}
+
+fn shared_config_path(path: &str) -> bool {
+    let parent = parent_dir(path);
+    parent == "." || matches!(first_component(path), Some("config" | ".config"))
 }
 
 fn owning_root<'a>(
@@ -601,6 +750,10 @@ fn parent_dir(path: &str) -> String {
 
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+fn first_component(path: &str) -> Option<&str> {
+    path.split('/').next()
 }
 
 fn extension(path: &str) -> Option<String> {
