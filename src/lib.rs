@@ -4,6 +4,7 @@ pub mod completions;
 pub mod index;
 pub mod lancedb_store;
 pub mod output;
+pub mod project_graph;
 pub mod remote;
 pub mod saved_query;
 pub mod scip;
