@@ -33,6 +33,10 @@ flowchart TB
 | 索引 | `index ...`, `hooks ...` | 维护 freshness 和本地/remote 缓存 |
 | 集成接口 | `mcp`, `serve`, `watch` | 包装同一套 query service 和 watcher 状态 |
 
+任务级调查不属于命令族。`brief`、`context`、`analyze architecture` 或
+`analyze data-model` 这类行为应由 Agent/subagent 模板通过上述原语组合完成，
+不进入 CodeTrail CLI/MCP 的公共命令契约。
+
 ## 输出契约
 
 默认输出是短文本，面向真实终端阅读。需要机器读取时显式传 `--output json` 或 `--output jsonl`。

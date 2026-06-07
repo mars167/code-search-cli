@@ -1,12 +1,14 @@
-//! Codex batch query, query plan, and capability manifest.
+//! Codex batch query execution contract and capability manifest.
 //!
-//! Codex agents need more than single search results — they need auditable
-//! evidence planning: one request that fetches multiple evidence kinds, shares
-//! scope and budget, unifies pagination and caveats, and exposes the current
-//! workspace's fact-layer capabilities before execution.
+//! Codex agents sometimes need one request that fetches multiple evidence
+//! kinds, shares scope and budget, unifies pagination and caveats, and exposes
+//! the current workspace's fact-layer capabilities before execution. The agent
+//! supplies the query items and dependencies; CodeTrail executes the caller's
+//! plan without deciding the task strategy.
 //!
 //! Public JSON output still follows results/page/caveats. Each result carries
-//! query_id, producer, range proof, freshness proof, reliability, and next_action.
+//! query_id, producer, range proof, freshness proof, reliability, and execution
+//! metadata.
 
 use serde::{Deserialize, Serialize};
 

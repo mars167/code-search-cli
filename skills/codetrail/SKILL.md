@@ -7,6 +7,18 @@ description: Use when searching, navigating, validating, or documenting the Code
 
 Use `codetrail` for narrow, verifiable source evidence in this repository. Prefer JSON output for agent work, and verify important matches with `read` before editing.
 
+## Boundary
+
+CodeTrail is the search and navigation tool layer. It should not take over
+task planning, decide when an investigation is complete, or produce final
+task answers on its own.
+
+For a single narrow lookup, call the CLI directly. For multi-step repository
+investigations, delegate to a CodeTrail evidence subagent when one is
+available, then use its compact evidence package in the main task. The
+subagent owns query sequencing and compression; CodeTrail still only returns
+source, navigation, relationship, status, and freshness facts.
+
 ## Command Prefix
 
 Prefer the installed binary when available:
@@ -37,6 +49,25 @@ Use `--path <dir>` when searching from outside the repository root or when the u
 3. Before editing or making a strong claim, verify key ranges with `codetrail read <path[:start-end]>`.
 4. Treat `calls` and `callers` as `inferred_candidate`; inspect the returned ranges before relying on them.
 5. Treat `remote_unverified` as a lead only; verify with local `read`.
+
+## Subagent Handoff
+
+Use the repository's CodeTrail evidence subagent template for tasks that would
+otherwise require a long loop of search/read/refine steps. Ask the subagent to
+return only:
+
+- the task it investigated;
+- a short answer-oriented summary;
+- path and line-range evidence;
+- caveats about missing, ambiguous, stale, or inferred results;
+- a concise query trace.
+
+Every evidence location returned by the subagent must include a line number or
+line range such as `src/lib.rs:12-40`. File-only paths are leads, not evidence.
+
+Do not ask the subagent to edit files or make product decisions. Do not ask
+the CodeTrail CLI to run task-specific analysis commands such as `brief`,
+`context`, `analyze architecture`, or `analyze data-model`.
 
 ## Scope Controls
 

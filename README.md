@@ -136,7 +136,7 @@ Core boundaries:
 
 ## Agent Skill
 
-This repository includes an LLM Agent Skill:
+This repository includes an LLM Agent Skill and agent templates:
 
 ```text
 skills/codetrail/
@@ -153,6 +153,17 @@ If you are already inside this repository checkout, install from local root:
 ```bash
 npx skills add . --skill codetrail
 ```
+
+For multi-step repository investigation, install the OpenCode subagent template:
+
+```text
+skills/codetrail/agents/opencode/codetrail-evidence.md
+```
+
+into `.opencode/agents/` or `~/.config/opencode/agents/`. The subagent owns
+task-aware query sequencing and evidence compression; CodeTrail itself remains
+the search/navigation tool layer. Do not add task-specific CLI commands such as
+`brief`, `context`, or `analyze-*`.
 
 ## Documentation
 

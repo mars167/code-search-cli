@@ -136,7 +136,7 @@ flowchart TB
 
 ## Agent Skill
 
-本仓库包含一个给 LLM Agent 使用的 Skill：
+本仓库包含给 LLM Agent 使用的 Skill 和 agent 模板：
 
 ```text
 skills/codetrail/
@@ -153,6 +153,16 @@ npx skills add https://github.com/mars167/CodeTrail --skill codetrail
 ```bash
 npx skills add . --skill codetrail
 ```
+
+多步仓库调查应安装 OpenCode subagent 模板：
+
+```text
+skills/codetrail/agents/opencode/codetrail-evidence.md
+```
+
+安装到 `.opencode/agents/` 或 `~/.config/opencode/agents/`。subagent 负责
+任务相关的查询顺序和证据压缩；CodeTrail 本身仍然只作为搜索/导航工具层。
+不要把 `brief`、`context` 或 `analyze-*` 这类任务级命令加到 CLI。
 
 ## 文档
 

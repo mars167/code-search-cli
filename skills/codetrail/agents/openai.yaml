@@ -1,4 +1,9 @@
 interface:
   display_name: "CodeTrail"
-  short_description: "Use codetrail with verifiable evidence"
-  default_prompt: "Use $codetrail to find and verify source evidence in this repository."
+  short_description: "Use CodeTrail search primitives and evidence subagents"
+  search_terms:
+    - "codetrail"
+    - "code search"
+    - "source evidence"
+    - "subagent evidence"
+  default_prompt: "Use $codetrail for narrow, verifiable source evidence. For multi-step repository investigation, delegate to the CodeTrail evidence subagent template when available; keep CodeTrail itself as the search/navigation tool layer, not a task-planning command."

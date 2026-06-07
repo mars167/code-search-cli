@@ -29,10 +29,13 @@ CodeTrail 是本地优先、Git 优先的代码搜索与跳转工具，目标是
 - 定义、引用、符号、调用候选和变更状态。
 - 本地索引、Git hook、watcher、saved query、remote pack/unpack 和 MCP 入口。
 - 每个响应的 snapshot、producer、freshness 与 reliability 信息。
+- 给 Agent 使用的 Skill 和 subagent 模板，用于把多步调查封装在 Agent 层。
 
 它不承诺：
 
 - 默认 embedding 或语义相似度搜索。
+- 自主规划并完成具体开发任务。
+- 提供 `brief`、`context` 或 `analyze-*` 这类任务级分析命令。
 - 把启发式调用图伪装成精确事实。
 - 用 remote 结果覆盖本地 dirty/staged 状态。
 - 用 watcher 替代 Git hook 或 staged/commit snapshot。
@@ -65,6 +68,10 @@ flowchart TB
 ```
 
 索引是加速层，不是事实源。事实源始终是本地源码、Git 状态、文件 hash 和可读取的 range。
+
+任务意图、查询顺序和停止条件属于 Agent 层。CodeTrail 的 CLI/MCP 只执行
+可组合的搜索、跳转、读取、索引和状态原语；subagent 可以使用这些原语完成
+多步调查，并把结果压缩为主 Agent 可消费的证据包。
 
 ## 可靠性
 
