@@ -21,6 +21,24 @@ Do not add task-specific CLI commands such as `brief`, `context`, or
 `analyze-*` to CodeTrail. Add task behavior to agent templates, and keep
 CodeTrail's public commands as composable search primitives.
 
+## Codex
+
+Install the Codex template by copying:
+
+```text
+skills/codetrail/agents/codex/codetrail-evidence.toml
+```
+
+to:
+
+```text
+~/.codex/agents/codetrail-evidence.toml
+```
+
+The template registers the `codetrail-evidence` subagent. It should be invoked
+for repository investigations that would otherwise consume many turns of search
+and read output in the primary session.
+
 ## OpenCode
 
 Install the OpenCode template by copying:
