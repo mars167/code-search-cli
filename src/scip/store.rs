@@ -1,14 +1,21 @@
-use std::{fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::scip_proto::proto;
 
+const OCCURRENCE_DB_SCHEMA_VERSION: &str = "2";
+
 /// A single occurrence result from the store.
 #[derive(Clone, Debug)]
 pub struct OccurrenceResult {
+    pub symbol_key: String,
     pub path: String,
     pub language: String,
     pub symbol: String,
@@ -25,6 +32,7 @@ pub struct OccurrenceResult {
 /// A symbol result from the store.
 #[derive(Clone, Debug)]
 pub struct SymbolResult {
+    pub symbol_key: String,
     pub symbol: String,
     pub name: String,
     pub kind: String,
@@ -69,7 +77,7 @@ pub fn build_occurrences_db(
         let path = document.relative_path.clone();
 
         // Build symbol lookup: symbol string -> (display_name, kind)
-        let symbols: std::collections::HashMap<&str, (&str, &str)> = document
+        let symbols: HashMap<&str, (&str, &str)> = document
             .symbols
             .iter()
             .map(|sym| {
@@ -106,29 +114,26 @@ pub fn build_occurrences_db(
             };
 
             let default_name = display_name_from_symbol(&occurrence.symbol);
-            let (display_name, kind) = symbols
+            let (metadata_name, kind) = symbols
                 .get(occurrence.symbol.as_str())
                 .copied()
                 .unwrap_or((default_name.as_str(), "symbol"));
 
-            let display_name = if display_name.is_empty() {
+            let display_name = if metadata_name.is_empty() {
                 display_name_from_symbol(&occurrence.symbol)
             } else {
-                display_name.to_string()
+                metadata_name.to_string()
             };
 
-            // Upsert symbol
-            let symbol_id: i64 = tx
-                .prepare("SELECT id FROM symbols WHERE symbol = ?1")?
-                .query_row(params![occurrence.symbol], |row| row.get(0))
-                .unwrap_or_else(|_| {
-                    tx.execute(
-                        "INSERT INTO symbols (symbol, name, kind, language) VALUES (?1, ?2, ?3, ?4)",
-                        params![occurrence.symbol, display_name, kind, language],
-                    )
-                    .unwrap();
-                    tx.last_insert_rowid()
-                });
+            let symbol_key = symbol_key_for_document(&path, &occurrence.symbol);
+            let symbol_id = upsert_symbol(
+                &tx,
+                &symbol_key,
+                &occurrence.symbol,
+                &display_name,
+                kind,
+                &language,
+            )?;
 
             // Insert occurrence with 1-based positions
             tx.execute(
@@ -156,15 +161,13 @@ pub fn build_occurrences_db(
 
     // Store per-file hashes for freshness validation
     {
-        let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen_paths: HashSet<&str> = HashSet::new();
         for document in &scip_index.documents {
             if seen_paths.insert(&document.relative_path) {
                 let abs_path = root.join(&document.relative_path);
-                let hash = if abs_path.exists() {
-                    let content = fs::read(&abs_path).unwrap_or_default();
-                    format!("blake3:{}", blake3::hash(&content).to_hex())
-                } else {
-                    String::new()
+                let hash = match fs::read(&abs_path) {
+                    Ok(content) => format!("blake3:{}", blake3::hash(&content).to_hex()),
+                    Err(_) => String::new(),
                 };
                 tx.execute(
                     "INSERT OR REPLACE INTO file_hashes (file_path, hash) VALUES (?1, ?2)",
@@ -193,10 +196,12 @@ pub fn occurrence_db_fresh(db_path: &Path, snapshot: &str, root: &Path) -> bool 
     if !db_path.exists() {
         return false;
     }
-    if !check_snapshot_hash(db_path, snapshot).unwrap_or(false) {
+    let Ok(conn) = Connection::open(db_path) else {
         return false;
-    }
-    all_file_hashes_match(db_path, root).unwrap_or(false)
+    };
+    schema_is_current(&conn).unwrap_or(false)
+        && check_snapshot_hash(&conn, snapshot).unwrap_or(false)
+        && all_file_hashes_match(&conn, root).unwrap_or(false)
 }
 
 /// Delete the occurrence DB (force rebuild).
@@ -215,11 +220,11 @@ pub fn query_defs(db_path: &Path, identifier: &str) -> Result<Vec<OccurrenceResu
     let conn = Connection::open(db_path)?;
 
     let mut stmt = conn.prepare(
-        "SELECT o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
+        "SELECT s.symbol_key, o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
                 o.start_line, o.start_column, o.end_line, o.end_column, o.file_hash \
          FROM occurrences o \
          JOIN symbols s ON o.symbol_id = s.id \
-         WHERE o.role = 'definition' AND (s.name = ?1 OR s.symbol = ?1) \
+         WHERE o.role = 'definition' AND (s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1) \
          ORDER BY o.file_path, o.start_line",
     )?;
 
@@ -238,16 +243,38 @@ pub fn query_refs(db_path: &Path, identifier: &str) -> Result<Vec<OccurrenceResu
     let conn = Connection::open(db_path)?;
 
     let mut stmt = conn.prepare(
-        "SELECT o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
+        "SELECT s.symbol_key, o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
                 o.start_line, o.start_column, o.end_line, o.end_column, o.file_hash \
          FROM occurrences o \
          JOIN symbols s ON o.symbol_id = s.id \
-         WHERE o.role = 'reference' AND (s.name = ?1 OR s.symbol = ?1) \
+         WHERE o.role = 'reference' AND (s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1) \
          ORDER BY o.file_path, o.start_line",
     )?;
 
     let results = stmt
         .query_map(params![identifier], map_occurrence_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(results)
+}
+
+pub fn query_refs_by_symbol_key(db_path: &Path, symbol_key: &str) -> Result<Vec<OccurrenceResult>> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db_path)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT s.symbol_key, o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
+                o.start_line, o.start_column, o.end_line, o.end_column, o.file_hash \
+         FROM occurrences o \
+         JOIN symbols s ON o.symbol_id = s.id \
+         WHERE o.role = 'reference' AND s.symbol_key = ?1 \
+         ORDER BY o.file_path, o.start_line",
+    )?;
+
+    let results = stmt
+        .query_map(params![symbol_key], map_occurrence_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     Ok(results)
@@ -261,28 +288,29 @@ pub fn query_symbols(db_path: &Path, query: &str) -> Result<Vec<SymbolResult>> {
     let conn = Connection::open(db_path)?;
 
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT s.symbol, s.name, s.kind, s.language, \
+        "SELECT DISTINCT s.symbol_key, s.symbol, s.name, s.kind, s.language, \
                 o.file_path, o.role, o.start_line, o.start_column, o.end_line, o.end_column \
          FROM symbols s \
          JOIN occurrences o ON o.symbol_id = s.id \
-         WHERE o.role = 'definition' AND (s.name LIKE ?1 OR s.symbol LIKE ?1) \
-         ORDER BY s.kind, s.name, s.symbol, o.file_path",
+         WHERE o.role = 'definition' AND (s.name LIKE ?1 OR s.symbol LIKE ?1 OR s.symbol_key LIKE ?1) \
+         ORDER BY s.kind, s.name, s.symbol_key, o.file_path",
     )?;
 
     let like_pattern = format!("%{}%", query);
     let results = stmt
         .query_map(params![like_pattern], |row| {
             Ok(SymbolResult {
-                symbol: row.get(0)?,
-                name: row.get(1)?,
-                kind: row.get(2)?,
-                language: row.get(3)?,
-                path: row.get(4)?,
-                role: row.get(5)?,
-                start_line: row.get(6)?,
-                start_column: row.get(7)?,
-                end_line: row.get(8)?,
-                end_column: row.get(9)?,
+                symbol_key: row.get(0)?,
+                symbol: row.get(1)?,
+                name: row.get(2)?,
+                kind: row.get(3)?,
+                language: row.get(4)?,
+                path: row.get(5)?,
+                role: row.get(6)?,
+                start_line: row.get(7)?,
+                start_column: row.get(8)?,
+                end_line: row.get(9)?,
+                end_column: row.get(10)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -341,7 +369,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS symbols (
             id INTEGER PRIMARY KEY,
-            symbol TEXT NOT NULL UNIQUE,
+            symbol_key TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
             name TEXT NOT NULL,
             kind TEXT NOT NULL DEFAULT '',
             language TEXT NOT NULL DEFAULT ''
@@ -364,6 +393,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_occurrences_symbol_id ON occurrences(symbol_id);
         CREATE INDEX IF NOT EXISTS idx_occurrences_role ON occurrences(role);
         CREATE INDEX IF NOT EXISTS idx_occurrences_symbol ON occurrences(symbol);
+        CREATE INDEX IF NOT EXISTS idx_symbols_symbol_key ON symbols(symbol_key);
         CREATE INDEX IF NOT EXISTS idx_symbols_symbol ON symbols(symbol);
         CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 
@@ -377,11 +407,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
             hash TEXT NOT NULL
         );",
     )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+        params![OCCURRENCE_DB_SCHEMA_VERSION],
+    )?;
     Ok(())
 }
 
-fn check_snapshot_hash(db_path: &Path, snapshot: &str) -> Result<bool> {
-    let conn = Connection::open(db_path)?;
+fn check_snapshot_hash(conn: &Connection, snapshot: &str) -> Result<bool> {
     let stored: String = conn.query_row(
         "SELECT value FROM meta WHERE key = 'snapshot_hash'",
         [],
@@ -390,8 +423,7 @@ fn check_snapshot_hash(db_path: &Path, snapshot: &str) -> Result<bool> {
     Ok(stored == snapshot)
 }
 
-fn all_file_hashes_match(db_path: &Path, root: &Path) -> Result<bool> {
-    let conn = Connection::open(db_path)?;
+fn all_file_hashes_match(conn: &Connection, root: &Path) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT file_path, hash FROM file_hashes ORDER BY file_path")?;
     let entries: Vec<(String, String)> = stmt
         .query_map([], |row| {
@@ -417,6 +449,102 @@ fn all_file_hashes_match(db_path: &Path, root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn schema_is_current(conn: &Connection) -> Result<bool> {
+    let schema_version: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if schema_version.as_deref() != Some(OCCURRENCE_DB_SCHEMA_VERSION) {
+        return Ok(false);
+    }
+
+    let symbol_columns = table_columns(conn, "symbols")?;
+    let occurrence_columns = table_columns(conn, "occurrences")?;
+    Ok(symbol_columns.contains("symbol_key")
+        && symbol_columns.contains("symbol")
+        && occurrence_columns.contains("symbol_id")
+        && occurrence_columns.contains("symbol"))
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<HashSet<_>, _>>()?;
+    Ok(columns)
+}
+
+fn upsert_symbol(
+    tx: &rusqlite::Transaction<'_>,
+    symbol_key: &str,
+    symbol: &str,
+    name: &str,
+    kind: &str,
+    language: &str,
+) -> Result<i64> {
+    let existing = tx
+        .prepare("SELECT id, name, kind, language FROM symbols WHERE symbol_key = ?1")?
+        .query_row(params![symbol_key], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .optional()?;
+
+    if let Some((id, current_name, current_kind, current_language)) = existing {
+        let next_name = better_name(symbol, &current_name, name);
+        let next_kind = better_kind(&current_kind, kind);
+        let next_language = better_language(&current_language, language);
+        if next_name != current_name
+            || next_kind != current_kind
+            || next_language != current_language
+        {
+            tx.execute(
+                "UPDATE symbols SET name = ?1, kind = ?2, language = ?3 WHERE id = ?4",
+                params![next_name, next_kind, next_language, id],
+            )?;
+        }
+        return Ok(id);
+    }
+
+    tx.execute(
+        "INSERT INTO symbols (symbol_key, symbol, name, kind, language) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![symbol_key, symbol, name, kind, language],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn better_name(symbol: &str, current: &str, candidate: &str) -> String {
+    let fallback = display_name_from_symbol(symbol);
+    if !candidate.is_empty() && (current.is_empty() || current == fallback) {
+        candidate.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+fn better_kind(current: &str, candidate: &str) -> String {
+    if !candidate.is_empty() && (current.is_empty() || current == "symbol") {
+        candidate.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+fn better_language(current: &str, candidate: &str) -> String {
+    if !candidate.is_empty() && current.is_empty() {
+        candidate.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
 fn log_index_meta(
     db_path: &Path,
     snapshot: &str,
@@ -439,18 +567,27 @@ fn map_occurrence_row(
     row: &rusqlite::Row<'_>,
 ) -> std::result::Result<OccurrenceResult, rusqlite::Error> {
     Ok(OccurrenceResult {
-        path: row.get(0)?,
-        language: row.get(1)?,
-        symbol: row.get(2)?,
-        name: row.get(3)?,
-        kind: row.get(4)?,
-        role: row.get(5)?,
-        start_line: row.get(6)?,
-        start_column: row.get(7)?,
-        end_line: row.get(8)?,
-        end_column: row.get(9)?,
-        file_hash: row.get(10)?,
+        symbol_key: row.get(0)?,
+        path: row.get(1)?,
+        language: row.get(2)?,
+        symbol: row.get(3)?,
+        name: row.get(4)?,
+        kind: row.get(5)?,
+        role: row.get(6)?,
+        start_line: row.get(7)?,
+        start_column: row.get(8)?,
+        end_line: row.get(9)?,
+        end_column: row.get(10)?,
+        file_hash: row.get(11)?,
     })
+}
+
+fn symbol_key_for_document(path: &str, symbol: &str) -> String {
+    if symbol.starts_with("local ") {
+        format!("{path}:{symbol}")
+    } else {
+        symbol.to_string()
+    }
 }
 
 fn kind_name(sym: &proto::SymbolInformation) -> &str {
@@ -638,6 +775,133 @@ mod tests {
         std::fs::write(dir.path().join("src/file_7.rs"), "fn changed() {}\n").unwrap();
 
         assert!(!occurrence_db_fresh(&db_path, "snapshot-v1", dir.path()));
+    }
+
+    #[test]
+    fn freshness_rejects_old_schema_without_scoped_symbol_identity() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("occurrences.db");
+        let source_path = dir.path().join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, "fn needle() {}\n").unwrap();
+        let source_hash = format!(
+            "blake3:{}",
+            blake3::hash(&std::fs::read(&source_path).unwrap()).to_hex()
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE symbols (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE occurrences (
+                id INTEGER PRIMARY KEY,
+                symbol_id INTEGER NOT NULL REFERENCES symbols(id),
+                symbol TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                start_column INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                end_column INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                file_hash TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE file_hashes (
+                file_path TEXT PRIMARY KEY,
+                hash TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('snapshot_hash', 'snapshot-v1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_hashes (file_path, hash) VALUES ('src/lib.rs', ?1)",
+            params![source_hash],
+        )
+        .unwrap();
+
+        assert!(!occurrence_db_fresh(&db_path, "snapshot-v1", dir.path()));
+    }
+
+    #[test]
+    fn local_symbols_are_scoped_by_document_path() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("occurrences.db");
+        for (path, body) in [
+            ("src/alpha.rs", "fn alpha() {}\n"),
+            ("src/beta.rs", "fn beta() {}\n"),
+        ] {
+            let absolute_path = dir.path().join(path);
+            std::fs::create_dir_all(absolute_path.parent().unwrap()).unwrap();
+            std::fs::write(absolute_path, body).unwrap();
+        }
+
+        let index = proto::Index {
+            documents: vec![
+                proto::Document {
+                    language: "rust".to_string(),
+                    relative_path: "src/alpha.rs".to_string(),
+                    occurrences: vec![proto::Occurrence {
+                        range: vec![0, 3, 0, 8],
+                        symbol: "local 1".to_string(),
+                        symbol_roles: 1,
+                        ..Default::default()
+                    }],
+                    symbols: vec![proto::SymbolInformation {
+                        symbol: "local 1".to_string(),
+                        kind: proto::symbol_information::Kind::Function as i32,
+                        display_name: "alpha".to_string(),
+                        ..Default::default()
+                    }],
+                    position_encoding: proto::PositionEncoding::Utf8CodeUnitOffsetFromLineStart
+                        as i32,
+                    ..Default::default()
+                },
+                proto::Document {
+                    language: "rust".to_string(),
+                    relative_path: "src/beta.rs".to_string(),
+                    occurrences: vec![proto::Occurrence {
+                        range: vec![0, 3, 0, 7],
+                        symbol: "local 1".to_string(),
+                        symbol_roles: 1,
+                        ..Default::default()
+                    }],
+                    symbols: vec![proto::SymbolInformation {
+                        symbol: "local 1".to_string(),
+                        kind: proto::symbol_information::Kind::Function as i32,
+                        display_name: "beta".to_string(),
+                        ..Default::default()
+                    }],
+                    position_encoding: proto::PositionEncoding::Utf8CodeUnitOffsetFromLineStart
+                        as i32,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        build_occurrences_db(&index, &db_path, "snapshot-v1", dir.path()).unwrap();
+
+        let alpha_defs = query_defs(&db_path, "alpha").unwrap();
+        assert_eq!(alpha_defs.len(), 1);
+        assert_eq!(alpha_defs[0].path, "src/alpha.rs");
+        assert_eq!(alpha_defs[0].name, "alpha");
+
+        let beta_defs = query_defs(&db_path, "beta").unwrap();
+        assert_eq!(beta_defs.len(), 1);
+        assert_eq!(beta_defs[0].path, "src/beta.rs");
+        assert_eq!(beta_defs[0].name, "beta");
     }
 
     #[test]

@@ -18,8 +18,8 @@ pub mod reconcile;
 pub struct Watcher {
     pub workspace_root: PathBuf,
     pub running: bool,
-    pub last_event_at: Option<Instant>,
-    pub last_reconcile_at: Option<Instant>,
+    pub last_event_at: Option<u64>,
+    pub last_reconcile_at: Option<u64>,
     pub queue_len: usize,
     overlay: Overlay,
 }
@@ -44,7 +44,7 @@ impl Watcher {
     /// Returns the reconcile result. Does NOT start long-running watch.
     pub fn run_once(&mut self) -> Result<ReconcileResult> {
         let result = reconcile::reconcile(&self.workspace_root)?;
-        self.last_reconcile_at = Some(Instant::now());
+        self.last_reconcile_at = Some(now_ms());
         self.overlay.update_from_reconcile(&result);
         Ok(result)
     }
@@ -57,6 +57,13 @@ impl Watcher {
     /// Collect a batch of file system events into a normalized change set.
     /// Uses notify crate to watch for events with a debounce window.
     pub fn collect_events(&mut self, debounce_ms: u64) -> Result<ChangeSet> {
+        self.running = true;
+        let result = self.collect_events_running(debounce_ms);
+        self.running = false;
+        result
+    }
+
+    fn collect_events_running(&mut self, debounce_ms: u64) -> Result<ChangeSet> {
         use notify::{Event, RecursiveMode, Watcher as _};
 
         let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
@@ -82,7 +89,7 @@ impl Watcher {
                     if !events::should_skip_event(&event) {
                         raw_events.push(event);
                     }
-                    self.last_event_at = Some(Instant::now());
+                    self.last_event_at = Some(now_ms());
                     // Break when debounce window has elapsed after events arrived
                     let elapsed = start.elapsed();
                     if elapsed >= timeout && !raw_events.is_empty() {
@@ -119,11 +126,12 @@ impl Watcher {
 
         json!({
             "running": self.running,
+            "state": if self.running { "collecting" } else { "idle" },
             "root": self.workspace_root,
             "queueLength": self.queue_len,
             "stale": stale,
-            "lastEventAt": self.last_event_at.map(|_| now_ms()),
-            "lastReconcileAt": self.last_reconcile_at.map(|_| now_ms()),
+            "lastEventAt": self.last_event_at,
+            "lastReconcileAt": self.last_reconcile_at,
             "mode": "reconcile_on_demand",
             "overlay": overlay_status,
         })
@@ -164,5 +172,15 @@ mod tests {
         assert_eq!(status["overlay"]["stale"], true);
         assert_eq!(status["overlay"]["addedCount"], 1);
         assert_eq!(status["overlay"]["deletedCount"], 1);
+    }
+
+    #[test]
+    fn status_reports_idle_state_for_on_demand_watcher() {
+        let watcher = Watcher::start(Path::new("/tmp/codetrail-watch-idle")).unwrap();
+        let status = watcher.status();
+
+        assert_eq!(status["running"], false);
+        assert_eq!(status["state"], "idle");
+        assert_eq!(status["mode"], "reconcile_on_demand");
     }
 }

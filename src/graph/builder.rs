@@ -56,7 +56,7 @@ pub(crate) fn build_petgraph_backend(
 
 #[derive(Clone)]
 struct ScipDefinition {
-    symbol: String,
+    symbol_key: String,
     name: String,
     language: String,
     path: String,
@@ -84,9 +84,9 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
     for sym in &symbols {
         if sym.role == "definition" {
             def_locations.insert(
-                sym.symbol.clone(),
+                sym.symbol_key.clone(),
                 ScipDefinition {
-                    symbol: sym.symbol.clone(),
+                    symbol_key: sym.symbol_key.clone(),
                     name: sym.name.clone(),
                     language: sym.language.clone(),
                     path: sym.path.clone(),
@@ -101,7 +101,7 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
 
     for definition in def_locations.values() {
         backend.ensure_node(GraphNode {
-            id: definition.symbol.clone(),
+            id: definition.symbol_key.clone(),
             display_name: definition.name.clone(),
             kind: NodeKind::Function,
             language: definition.language.clone(),
@@ -114,7 +114,7 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
     }
 
     for sym in def_locations.values() {
-        let Ok(refs) = scip::query_refs(&db_path, &sym.symbol) else {
+        let Ok(refs) = scip::query_refs_by_symbol_key(&db_path, &sym.symbol_key) else {
             continue;
         };
         for r in refs {
@@ -125,12 +125,12 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
                 .max_by_key(|definition| definition.start_line);
 
             if let Some(caller) = enclosing {
-                if caller.symbol == r.symbol {
+                if caller.symbol_key == r.symbol_key {
                     continue;
                 }
 
                 backend.ensure_node(GraphNode {
-                    id: r.symbol.clone(),
+                    id: r.symbol_key.clone(),
                     display_name: r.name.clone(),
                     kind: NodeKind::Function,
                     language: r.language.clone(),
@@ -142,8 +142,8 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
                 });
 
                 let (Some(&caller_idx), Some(&callee_idx)) = (
-                    backend.node_by_id.get(&caller.symbol),
-                    backend.node_by_id.get(&r.symbol),
+                    backend.node_by_id.get(&caller.symbol_key),
+                    backend.node_by_id.get(&r.symbol_key),
                 ) else {
                     continue;
                 };
@@ -163,8 +163,8 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
                             file_path: r.path.clone(),
                             call_line: r.start_line,
                             call_column: r.start_column,
-                            caller_id: caller.symbol.clone(),
-                            callee_id: r.symbol.clone(),
+                            caller_id: caller.symbol_key.clone(),
+                            callee_id: r.symbol_key.clone(),
                             language: r.language.clone(),
                             file_hash: r.file_hash.clone(),
                         },

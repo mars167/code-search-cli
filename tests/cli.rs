@@ -4215,6 +4215,7 @@ fn watch_status_output_format() {
     let watcher = &results[0];
     assert!(watcher.is_object());
     assert_eq!(watcher["running"], false);
+    assert_eq!(watcher["state"], "idle");
     assert!(watcher["root"].is_string());
     assert!(watcher["queueLength"].is_number());
     assert!(watcher["stale"].is_boolean());
