@@ -76,6 +76,35 @@ pub fn lancedb_root(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".codetrail").join("index.lance")
 }
 
+fn lancedb_connect_uri(path: &Path) -> String {
+    lancedb_connect_uri_from_display(&path.display().to_string())
+}
+
+fn lancedb_connect_uri_from_display(display: &str) -> String {
+    let normalized = if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = display.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        display.to_string()
+    };
+
+    if looks_like_windows_path(&normalized) {
+        normalized.replace('\\', "/")
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_windows_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let drive_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    drive_path || value.starts_with(r"\\")
+}
+
 static RUNTIME: LazyLock<tokio::runtime::Runtime> =
     LazyLock::new(|| tokio::runtime::Runtime::new().expect("failed to create tokio runtime"));
 
@@ -88,7 +117,8 @@ impl LanceDbStore {
         let lance_path = lancedb_root(root);
         std::fs::create_dir_all(&lance_path)
             .with_context(|| format!("failed to create {:?}", lance_path))?;
-        let db = block_on(connect(&lance_path.display().to_string()).execute())
+        let uri = lancedb_connect_uri(&lance_path);
+        let db = block_on(connect(&uri).execute())
             .with_context(|| format!("failed to connect to {:?}", lance_path))?;
         Ok(Self {
             db: Arc::new(db),
@@ -1040,7 +1070,8 @@ pub fn is_available(workspace_root: &Path) -> bool {
         Ok(rt) => rt,
         Err(_) => return false,
     };
-    match rt.block_on(connect(&root.display().to_string()).execute()) {
+    let uri = lancedb_connect_uri(&root);
+    match rt.block_on(connect(&uri).execute()) {
         Ok(db) => match rt.block_on(db.table_names().execute()) {
             Ok(tables) => !tables.is_empty(),
             Err(_) => false,
@@ -1103,6 +1134,34 @@ mod tests {
         assert_eq!(
             lancedb_root(p),
             PathBuf::from("/foo/bar/.codetrail/index.lance")
+        );
+    }
+
+    #[test]
+    fn test_lancedb_connect_uri_keeps_unix_paths_unchanged() {
+        assert_eq!(
+            lancedb_connect_uri_from_display("/foo/bar/.codetrail/index.lance"),
+            "/foo/bar/.codetrail/index.lance"
+        );
+    }
+
+    #[test]
+    fn test_lancedb_connect_uri_normalizes_windows_paths() {
+        assert_eq!(
+            lancedb_connect_uri_from_display(r"C:\Users\mars\repo\.codetrail\index.lance"),
+            "C:/Users/mars/repo/.codetrail/index.lance"
+        );
+        assert_eq!(
+            lancedb_connect_uri_from_display(r"\\?\C:\Users\mars\repo\.codetrail\index.lance"),
+            "C:/Users/mars/repo/.codetrail/index.lance"
+        );
+        assert_eq!(
+            lancedb_connect_uri_from_display(r"\\?\UNC\server\share\repo\.codetrail\index.lance"),
+            "//server/share/repo/.codetrail/index.lance"
+        );
+        assert_eq!(
+            lancedb_connect_uri_from_display(r"\\server\share\repo\.codetrail\index.lance"),
+            "//server/share/repo/.codetrail/index.lance"
         );
     }
 
