@@ -192,7 +192,7 @@ pub fn read(workspace: &Workspace, target: &str) -> Result<Value> {
     let request = ReadTarget::parse(target)?;
     let path = workspace.abs_path(&request.path);
     let canonical_path =
-        fs::canonicalize(&path).with_context(|| format!("failed to read {}", request.path))?;
+        dunce::canonicalize(&path).with_context(|| format!("failed to read {}", request.path))?;
     if !canonical_path.starts_with(&workspace.root) {
         return Err(anyhow!("path escapes workspace root: {}", request.path));
     }
@@ -512,7 +512,7 @@ fn resolve_workspace_dir(workspace: &Workspace, rel_dir: &str) -> Result<PathBuf
     if !base.exists() {
         return Err(anyhow!("directory does not exist: {rel_dir}"));
     }
-    let canonical = fs::canonicalize(&base)
+    let canonical = dunce::canonicalize(&base)
         .with_context(|| format!("failed to resolve path {}", base.display()))?;
     if !canonical.starts_with(&workspace.root) {
         return Err(anyhow!("path escapes workspace root: {rel_dir}"));

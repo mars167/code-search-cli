@@ -87,11 +87,16 @@ pub struct Workspace {
 impl Workspace {
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let input = crate::path_compat::native_path(path.as_ref());
-        let canonical = fs::canonicalize(&input)
+        let canonical = dunce::canonicalize(&input)
             .with_context(|| format!("failed to resolve path {}", input.display()))?;
         let git_root = git_output(&canonical, &["rev-parse", "--show-toplevel"])
             .ok()
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            .map(|path| {
+                dunce::canonicalize(&path)
+                    .with_context(|| format!("failed to resolve git root {}", path.display()))
+            })
+            .transpose()?;
         let root = git_root.clone().unwrap_or(canonical);
         let head = git_output(&root, &["rev-parse", "--verify", "HEAD"]).ok();
         let changed = git_status(&root).unwrap_or_default();

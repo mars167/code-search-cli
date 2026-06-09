@@ -1156,6 +1156,7 @@ dependencies = [
  "bincode",
  "blake3",
  "clap",
+ "dunce",
  "flate2",
  "futures",
  "globset",
