@@ -156,11 +156,12 @@ impl Workspace {
             if opts.changed && !self.changed.iter().any(|changed| changed.path == rel) {
                 continue;
             }
+            let Some(metadata) = file_metadata_for_catalog(|| fs::metadata(path)) else {
+                continue;
+            };
             if is_probably_binary(path) {
                 continue;
             }
-            let metadata =
-                fs::metadata(path).with_context(|| format!("failed to read metadata for {rel}"))?;
             files.push(FileCatalogRecord {
                 path: rel,
                 language,
@@ -426,6 +427,15 @@ fn is_generated_path(path: &Path) -> bool {
     })
 }
 
+fn file_metadata_for_catalog(
+    read_metadata: impl FnOnce() -> std::io::Result<fs::Metadata>,
+) -> Option<fs::Metadata> {
+    match read_metadata() {
+        Ok(metadata) if metadata.is_file() => Some(metadata),
+        Ok(_) | Err(_) => None,
+    }
+}
+
 fn is_probably_binary(path: &Path) -> bool {
     probably_binary_result(path).unwrap_or(true)
 }
@@ -457,6 +467,24 @@ pub(crate) fn file_mode(metadata: &fs::Metadata) -> u32 {
 #[cfg(not(unix))]
 pub(crate) fn file_mode(_metadata: &fs::Metadata) -> u32 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn catalog_metadata_lookup_errors_skip_the_entry() {
+        // Given: Windows reserved device paths such as `nul` can be visible to
+        // the walker but fail when statted with OS error 1.
+        // When: catalog metadata lookup sees that OS error.
+        let metadata = file_metadata_for_catalog(|| Err(io::Error::from_raw_os_error(1)));
+
+        // Then: the caller can skip the entry instead of aborting indexing.
+        assert!(metadata.is_none());
+    }
 }
 
 fn short_hash(value: &str) -> String {
