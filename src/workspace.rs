@@ -469,6 +469,10 @@ pub(crate) fn file_mode(_metadata: &fs::Metadata) -> u32 {
     0
 }
 
+fn short_hash(value: &str) -> String {
+    value.chars().take(12).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -485,15 +489,6 @@ mod tests {
         // Then: the caller can skip the entry instead of aborting indexing.
         assert!(metadata.is_none());
     }
-}
-
-fn short_hash(value: &str) -> String {
-    value.chars().take(12).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn parse_git_status_line_normalizes_windows_separators() {
