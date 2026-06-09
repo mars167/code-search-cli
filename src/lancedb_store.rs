@@ -4,8 +4,9 @@ fn escape_filter(s: &str) -> String {
 }
 
 use anyhow::{Context, Result};
-use arrow::array::Array;
+use arrow::array::{Array, RecordBatchReader};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use futures::StreamExt;
 use lancedb::connect;
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -35,7 +36,12 @@ pub struct SnapshotWrite<'a> {
 const READ_LIMIT: usize = 10_000_000;
 
 use anyhow::anyhow;
-use arrow::record_batch::RecordBatch;
+fn single_batch_reader(batch: RecordBatch, schema: SchemaRef) -> Box<dyn RecordBatchReader + Send> {
+    Box::new(RecordBatchIterator::new(
+        vec![batch].into_iter().map(Ok),
+        schema,
+    ))
+}
 
 /// Safely downcast a RecordBatch column to a specific Arrow array type.
 /// Returns an error instead of panicking if the type doesn't match.
@@ -200,7 +206,7 @@ impl LanceDbStore {
 
     pub fn write_snapshot(&self, snapshot: SnapshotWrite<'_>) -> Result<()> {
         use arrow::array::{BooleanArray, StringArray, UInt32Array, UInt64Array};
-        use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+        use arrow::record_batch::RecordBatch;
 
         let SnapshotWrite {
             snapshot_id,
@@ -236,10 +242,10 @@ impl LanceDbStore {
         )
         .context("failed to create snapshot RecordBatch")?;
 
-        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        let batches = single_batch_reader(batch, schema);
         let table = block_on(self.db.open_table("snapshots").execute())
             .context("failed to open snapshots table")?;
-        block_on(table.add(Box::new(batches)).execute()).context("failed to add snapshot row")?;
+        block_on(table.add(batches).execute()).context("failed to add snapshot row")?;
         Ok(())
     }
 
@@ -253,7 +259,7 @@ impl LanceDbStore {
         }
 
         use arrow::array::{BooleanArray, StringArray, UInt32Array, UInt64Array};
-        use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+        use arrow::record_batch::RecordBatch;
 
         let n = records.len();
         let mut snapshot_ids = Vec::with_capacity(n);
@@ -292,11 +298,10 @@ impl LanceDbStore {
         )
         .context("failed to create file_catalog RecordBatch")?;
 
-        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        let batches = single_batch_reader(batch, schema);
         let table = block_on(self.db.open_table("file_catalog").execute())
             .context("failed to open file_catalog table")?;
-        block_on(table.add(Box::new(batches)).execute())
-            .context("failed to add file_catalog rows")?;
+        block_on(table.add(batches).execute()).context("failed to add file_catalog rows")?;
         Ok(())
     }
 
@@ -311,7 +316,7 @@ impl LanceDbStore {
         }
 
         use arrow::array::{StringArray, UInt64Array};
-        use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+        use arrow::record_batch::RecordBatch;
 
         let n = records.len();
         let mut snapshot_ids = Vec::with_capacity(n);
@@ -345,11 +350,10 @@ impl LanceDbStore {
         )
         .context("failed to create file_proofs RecordBatch")?;
 
-        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        let batches = single_batch_reader(batch, schema);
         let table = block_on(self.db.open_table("file_proofs").execute())
             .context("failed to open file_proofs table")?;
-        block_on(table.add(Box::new(batches)).execute())
-            .context("failed to add file_proofs rows")?;
+        block_on(table.add(batches).execute()).context("failed to add file_proofs rows")?;
         Ok(())
     }
 
@@ -363,7 +367,7 @@ impl LanceDbStore {
         }
 
         use arrow::array::{StringArray, UInt32Array};
-        use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+        use arrow::record_batch::RecordBatch;
 
         let estimated = gram_index.values().map(|v| v.len()).sum::<usize>();
         let mut snapshot_ids = Vec::with_capacity(estimated);
@@ -390,11 +394,10 @@ impl LanceDbStore {
         )
         .context("failed to create gram_postings RecordBatch")?;
 
-        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        let batches = single_batch_reader(batch, schema);
         let table = block_on(self.db.open_table("gram_postings").execute())
             .context("failed to open gram_postings table")?;
-        block_on(table.add(Box::new(batches)).execute())
-            .context("failed to add gram_postings rows")?;
+        block_on(table.add(batches).execute()).context("failed to add gram_postings rows")?;
         Ok(())
     }
     pub fn write_scip_occurrences(
@@ -407,7 +410,7 @@ impl LanceDbStore {
         }
 
         use arrow::array::{BooleanArray, StringArray, UInt32Array};
-        use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+        use arrow::record_batch::RecordBatch;
 
         let n = records.len();
         let mut snapshot_ids = Vec::with_capacity(n);
@@ -467,11 +470,10 @@ impl LanceDbStore {
         )
         .context("failed to create scip_occurrences RecordBatch")?;
 
-        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        let batches = single_batch_reader(batch, schema);
         let table = block_on(self.db.open_table("scip_occurrences").execute())
             .context("failed to open scip_occurrences table")?;
-        block_on(table.add(Box::new(batches)).execute())
-            .context("failed to add scip_occurrences rows")?;
+        block_on(table.add(batches).execute()).context("failed to add scip_occurrences rows")?;
         Ok(())
     }
 

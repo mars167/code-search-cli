@@ -7,10 +7,9 @@ use serde_json::{json, Value};
 
 use arrow::array::{StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::reader::FileReader;
+use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 
 use crate::workspace::FileRecord;
 
@@ -20,7 +19,7 @@ pub struct SnapshotFreshness {
     pub missing_files: Vec<Value>,
 }
 
-/// Write files.parquet from FileRecord list using Arrow/Parquet
+/// Write the legacy files.parquet path using Arrow IPC data.
 pub fn write_files_parquet(path: &Path, records: &[FileRecord]) -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("path", DataType::Utf8, false),
@@ -56,19 +55,17 @@ pub fn write_files_parquet(path: &Path, records: &[FileRecord]) -> Result<()> {
     )?;
 
     let file = File::create(path)?;
-    let props = WriterProperties::builder().build();
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut writer = FileWriter::try_new(file, schema.as_ref())?;
     writer.write(&batch)?;
-    writer.close()?;
+    writer.finish()?;
 
     Ok(())
 }
 
-/// Read files.parquet back into FileRecords
+/// Read the legacy files.parquet path back into FileRecords.
 pub fn read_files_parquet(path: &Path) -> Result<Vec<FileRecord>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
+    let reader = FileReader::try_new(file, None)?;
 
     let mut records = Vec::new();
     for batch_result in reader {
