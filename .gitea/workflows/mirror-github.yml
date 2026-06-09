@@ -21,9 +21,48 @@ jobs:
         run: git config --global http.https://git.home.arpa/.sslVerify false
 
       - name: Checkout Gitea ref
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        env:
+          GITEA_REF: ${{ github.ref }}
+          GITEA_REPOSITORY: ${{ github.repository }}
+          GITEA_SERVER_URL: ${{ github.server_url }}
+          GITEA_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          ref="${GITHUB_REF:-${GITEA_REF:-}}"
+          sha="${GITHUB_SHA:-${GITEA_SHA:-}}"
+          if [ -z "$ref" ]; then
+            echo "Unable to determine pushed ref." >&2
+            exit 1
+          fi
+          if [ -z "${GITEA_SERVER_URL:-}" ] || [ -z "${GITEA_REPOSITORY:-}" ]; then
+            echo "Unable to determine Gitea repository URL." >&2
+            exit 1
+          fi
+
+          git init .
+          git remote add origin "${GITEA_SERVER_URL}/${GITEA_REPOSITORY}.git"
+
+          case "$ref" in
+            refs/heads/*)
+              branch="${ref#refs/heads/}"
+              git fetch --no-tags --depth=1 origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+              git checkout --detach FETCH_HEAD
+              if [ -n "$sha" ] && [ "$(git rev-parse HEAD)" != "$sha" ]; then
+                echo "Fetched branch head does not match event SHA." >&2
+                echo "expected=$sha actual=$(git rev-parse HEAD)" >&2
+                exit 1
+              fi
+              ;;
+            refs/tags/*)
+              tag="${ref#refs/tags/}"
+              git fetch --depth=1 origin "+refs/tags/${tag}:refs/tags/${tag}"
+              git checkout --detach "refs/tags/${tag}"
+              ;;
+            *)
+              echo "Skipping unsupported ref: $ref"
+              ;;
+          esac
 
       - name: Force push current ref to GitHub
         env:
