@@ -1,6 +1,6 @@
 [package]
 name = "codetrail"
-version = "0.1.6-beta.1"
+version = "0.1.6-beta.2"
 edition = "2021"
 description = "CodeTrail: 确定性优先、带可靠性标注的代码搜索 CLI。"
 license = "MIT"
