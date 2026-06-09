@@ -1,5 +1,6 @@
 use std::fs::{self, File};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,6 +13,23 @@ use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 
 use crate::workspace::FileRecord;
+
+const PARQUET_MAGIC: [u8; 4] = *b"PAR1";
+
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotStoreError {
+    #[error("legacy Parquet file catalog requires rebuilding the index: {}", path.display())]
+    LegacyParquetCatalog { path: PathBuf },
+}
+
+pub fn is_legacy_parquet_catalog_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<SnapshotStoreError>(),
+            Some(SnapshotStoreError::LegacyParquetCatalog { .. })
+        )
+    })
+}
 
 pub struct SnapshotFreshness {
     pub fresh_count: usize,
@@ -64,7 +82,14 @@ pub fn write_files_parquet(path: &Path, records: &[FileRecord]) -> Result<()> {
 
 /// Read the legacy files.parquet path back into FileRecords.
 pub fn read_files_parquet(path: &Path) -> Result<Vec<FileRecord>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    if is_legacy_parquet_catalog(&mut file)? {
+        return Err(SnapshotStoreError::LegacyParquetCatalog {
+            path: path.to_path_buf(),
+        }
+        .into());
+    }
     let reader = FileReader::try_new(file, None)?;
 
     let mut records = Vec::new();
@@ -109,6 +134,13 @@ pub fn read_files_parquet(path: &Path) -> Result<Vec<FileRecord>> {
     }
 
     Ok(records)
+}
+
+fn is_legacy_parquet_catalog(file: &mut File) -> Result<bool> {
+    let mut magic = [0u8; 4];
+    let bytes_read = file.read(&mut magic)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(bytes_read == PARQUET_MAGIC.len() && magic == PARQUET_MAGIC)
 }
 
 /// Write a content-addressed blob to blobs/<hash_hex>

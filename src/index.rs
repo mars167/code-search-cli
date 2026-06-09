@@ -323,13 +323,14 @@ pub fn status(workspace: &Workspace) -> Result<Value> {
     };
     let snapshot_path = snapshot_dir(workspace, &manifest.snapshot_key);
     let text_path = text_dir(workspace, &manifest.snapshot_key);
-    let snap_fresh = snapshot_store::verify_snapshot(&snapshot_path, &workspace.root)?;
-    let fresh = snap_fresh.stale_files.is_empty() && snap_fresh.missing_files.is_empty();
-    let freshness = json!({
-        "freshCount": snap_fresh.fresh_count,
-        "staleFiles": snap_fresh.stale_files,
-        "missingFiles": snap_fresh.missing_files
-    });
+    let freshness = match snapshot_store::verify_snapshot(&snapshot_path, &workspace.root) {
+        Ok(snap_fresh) => snapshot_freshness_json(snap_fresh),
+        Err(error) if snapshot_store::is_legacy_parquet_catalog_error(&error) => {
+            legacy_snapshot_freshness(&snapshot_path.join("files.parquet"))
+        }
+        Err(error) => return Err(error),
+    };
+    let fresh = freshness_is_clean(&freshness);
     let remote = remote_status(workspace)?;
     let mut result = json!({
         "exists": true,
@@ -810,13 +811,16 @@ fn local_text_snapshot(
     if !files_path.exists() {
         return Ok(None);
     }
-    let records = snapshot_store::read_files_parquet(&files_path)?;
-    let snap_fresh = snapshot_store::verify_snapshot(&snapshot_path, &workspace.root)?;
-    let freshness = json!({
-        "freshCount": snap_fresh.fresh_count,
-        "staleFiles": snap_fresh.stale_files,
-        "missingFiles": snap_fresh.missing_files
-    });
+    let records = match snapshot_store::read_files_parquet(&files_path) {
+        Ok(records) => records,
+        Err(error) if snapshot_store::is_legacy_parquet_catalog_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let freshness = match snapshot_store::verify_snapshot(&snapshot_path, &workspace.root) {
+        Ok(snap_fresh) => snapshot_freshness_json(snap_fresh),
+        Err(error) if snapshot_store::is_legacy_parquet_catalog_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     Ok(Some(LocalTextSnapshot {
         manifest,
         records,
@@ -926,6 +930,26 @@ fn freshness_is_clean(freshness: &Value) -> bool {
             .and_then(Value::as_array)
             .map(|items| items.is_empty())
             .unwrap_or(true)
+}
+
+fn snapshot_freshness_json(freshness: snapshot_store::SnapshotFreshness) -> Value {
+    json!({
+        "freshCount": freshness.fresh_count,
+        "staleFiles": freshness.stale_files,
+        "missingFiles": freshness.missing_files
+    })
+}
+
+fn legacy_snapshot_freshness(files_path: &Path) -> Value {
+    json!({
+        "freshCount": 0,
+        "staleFiles": [{
+            "path": files_path.to_string_lossy().to_string(),
+            "reason": "legacy_snapshot_format",
+            "message": "legacy Parquet file catalog requires rebuilding the index"
+        }],
+        "missingFiles": []
+    })
 }
 
 fn freshness_paths(freshness: &Value, field: &str) -> BTreeSet<String> {
@@ -1491,7 +1515,13 @@ pub fn remote_snapshot_matches_local(workspace: &Workspace, remote_dir: &Path) -
         return Ok(false);
     }
 
-    let snap_fresh = snapshot_store::verify_snapshot(remote_dir, &workspace.root)?;
+    let snap_fresh = match snapshot_store::verify_snapshot(remote_dir, &workspace.root) {
+        Ok(snap_fresh) => snap_fresh,
+        Err(error) if snapshot_store::is_legacy_parquet_catalog_error(&error) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     Ok(snap_fresh.stale_files.is_empty() && snap_fresh.missing_files.is_empty())
 }
 

@@ -2792,6 +2792,84 @@ fn index_verify_detects_stale_files() {
 }
 
 #[test]
+fn index_status_marks_legacy_parquet_snapshot_stale_without_error() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("sample.txt"), "one\n").unwrap();
+
+    let codetrail_dir = dir.path().join(".codetrail");
+    let snapshot_key = "commit_legacy";
+    let snapshot_id = "commit:legacy";
+    fs::create_dir_all(codetrail_dir.join("working")).unwrap();
+    fs::create_dir_all(codetrail_dir.join("snapshots").join(snapshot_key)).unwrap();
+    fs::write(
+        codetrail_dir
+            .join("snapshots")
+            .join(snapshot_key)
+            .join("files.parquet"),
+        b"PAR1legacy",
+    )
+    .unwrap();
+    fs::write(
+        codetrail_dir.join("working").join("manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "toolVersion": "legacy",
+            "repoRoot": dir.path().to_string_lossy(),
+            "snapshotId": snapshot_id,
+            "snapshotKey": snapshot_key,
+            "source": "working_tree",
+            "head": null,
+            "dirty": false,
+            "fileCount": 1,
+            "scanOptions": {
+                "include": [],
+                "exclude": [],
+                "hidden": false,
+                "noIgnore": false,
+                "lang": [],
+                "changed": false
+            },
+            "createdAtEpochMs": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let status = &json["results"][0];
+    assert_eq!(status["exists"], true);
+    assert_eq!(status["fresh"], false);
+    assert_eq!(
+        status["freshness"]["staleFiles"][0]["reason"],
+        "legacy_snapshot_format"
+    );
+
+    let output = codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "verify"])
+        .assert()
+        .code(6)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["results"][0]["freshness"]["staleFiles"][0]["reason"],
+        "legacy_snapshot_format"
+    );
+}
+
+#[test]
 fn index_verify_ignores_missing_best_effort_graph_artifact() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("sample.txt"), "one\n").unwrap();
@@ -5010,4 +5088,87 @@ fn remote_mismatch_labels_results_as_unverified() {
         }
     }
     panic!("remote snapshot not found or remoteVerified not present");
+}
+
+#[test]
+fn legacy_parquet_remote_snapshot_is_unverified_without_error() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() { let _ = \"needle\"; }\n",
+    )
+    .unwrap();
+
+    codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let archive_path = dir.path().join("output.tar.gz");
+    codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "pack", "--output"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "clean"])
+        .assert()
+        .success();
+
+    codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "unpack"])
+        .arg(&archive_path)
+        .assert()
+        .success();
+
+    let remote_dir = fs::read_dir(dir.path().join(".codetrail").join("remote"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().is_dir())
+        .expect("remote snapshot exists")
+        .path();
+    fs::write(remote_dir.join("files.parquet"), b"PAR1legacy").unwrap();
+
+    let status = codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&status).unwrap();
+    let remote = json["results"][0]["remote"].as_array().unwrap();
+    assert_eq!(remote[0]["remoteVerified"], json!(false));
+
+    let files_output = codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["files", "main"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let files_json: Value = serde_json::from_slice(&files_output).unwrap();
+    assert_eq!(files_json["index"]["source"], "text_index:remote");
+    assert_eq!(files_json["index"]["remote_verified"], false);
+    assert_eq!(
+        files_json["results"][0]["sourceReason"],
+        "indexed_unverified"
+    );
 }
