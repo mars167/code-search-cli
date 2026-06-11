@@ -3942,6 +3942,40 @@ fn calls_and_callers_do_not_claim_graph_store_before_kuzu_backend_exists() {
     assert_eq!(callers_json["results"][0]["enclosingSymbol"], "alpha");
 }
 
+#[test]
+fn callers_after_index_build_matches_qualified_method_target_by_simple_name() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "struct Widget;\n\nimpl Widget {\n    fn run(&self) {\n        self.helper();\n    }\n\n    fn helper(&self) {}\n}\n",
+    )
+    .unwrap();
+
+    codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["index", "build"])
+        .assert()
+        .success();
+
+    let callers = codetrail()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["callers", "helper"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let callers_json: Value = serde_json::from_slice(&callers).unwrap();
+    assert_eq!(callers_json["results"][0]["enclosingSymbol"], "run");
+    assert!(callers_json["results"][0]["target"]
+        .as_str()
+        .unwrap()
+        .ends_with("helper"));
+}
+
 fn write_minimal_scip_json(path: &std::path::Path) {
     let value = json!({
         "documents": [

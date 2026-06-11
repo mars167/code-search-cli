@@ -345,9 +345,16 @@ impl PetgraphBackend {
             return vec![*idx];
         }
 
+        let query_is_simple = last_identifier(identifier) == identifier;
         self.graph
             .node_indices()
-            .filter(|idx| self.graph[*idx].display_name == identifier)
+            .filter(|idx| {
+                let node = &self.graph[*idx];
+                node.display_name == identifier
+                    || (query_is_simple
+                        && (last_identifier(&node.display_name) == identifier
+                            || last_identifier(&node.id) == identifier))
+            })
             .collect()
     }
 }
@@ -400,6 +407,13 @@ fn node_display_name(node: &GraphNode) -> String {
     } else {
         node.display_name.clone()
     }
+}
+
+fn last_identifier(target: &str) -> &str {
+    target
+        .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .find(|part| !part.is_empty())
+        .unwrap_or(target)
 }
 
 #[cfg(test)]
@@ -505,6 +519,33 @@ mod tests {
         assert_eq!(display_calls.len(), 1);
         assert_eq!(display_calls[0].target, "parse");
         assert_eq!(display_calls[0].enclosing_symbol, Some("parse".to_string()));
+    }
+
+    #[test]
+    fn graph_matches_simple_identifier_against_qualified_call_targets() {
+        let mut backend = PetgraphBackend::empty();
+        backend.snapshot_id = "test-snap".to_string();
+
+        let caller = make_test_node("run", NodeKind::Function);
+        let mut callee = make_test_node("self.helper", NodeKind::Function);
+        callee.display_name = "self.helper".to_string();
+        backend.ensure_node(caller);
+        backend.ensure_node(callee);
+
+        let edge = make_test_edge(
+            "run",
+            "self.helper",
+            "src/lib.rs",
+            EdgeSource::TreeSitterHeuristic,
+        );
+        let caller_idx = *backend.node_by_id.get("run").unwrap();
+        let callee_idx = *backend.node_by_id.get("self.helper").unwrap();
+        backend.graph.add_edge(caller_idx, callee_idx, edge);
+
+        let callers = backend.query_callers("helper").unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].target, "self.helper");
+        assert_eq!(callers[0].enclosing_symbol, Some("run".to_string()));
     }
 
     #[test]

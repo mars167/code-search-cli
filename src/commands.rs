@@ -381,24 +381,30 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             if let Some(ref store) = graph_store {
                 if store.freshness_check().unwrap_or(false) {
                     let results = store.query_calls(identifier).unwrap_or_default();
-                    let index_meta = store.index_meta(true);
-                    let warnings: Vec<String> = Vec::new();
-                    return emit_response(
-                        &cli.output,
-                        output::response_with_index(
-                            "calls",
-                            "calls",
-                            scoped_query(
-                                json!({ "identifier": identifier, "producer": "graph" }),
-                                &scan_opts,
+                    if !results.is_empty() {
+                        let index_meta = store.index_meta(true);
+                        let warnings: Vec<String> = Vec::new();
+                        return emit_response(
+                            &cli.output,
+                            output::response_with_index(
+                                "calls",
+                                "calls",
+                                scoped_query(
+                                    json!({ "identifier": identifier, "producer": "graph" }),
+                                    &scan_opts,
+                                ),
+                                &workspace.snapshot_id,
+                                output::inferred_candidate(),
+                                output::IndexedResponseParts::new(
+                                    index_meta,
+                                    json!(results),
+                                    warnings,
+                                ),
                             ),
-                            &workspace.snapshot_id,
-                            output::inferred_candidate(),
-                            output::IndexedResponseParts::new(index_meta, json!(results), warnings),
-                        ),
-                        &workspace,
-                        cli.save_query.as_deref(),
-                    );
+                            &workspace,
+                            cli.save_query.as_deref(),
+                        );
+                    }
                 }
             }
             // Fall back to tree-sitter
@@ -423,24 +429,30 @@ pub fn run(cli: Cli) -> AppResult<i32> {
             if let Some(ref store) = graph_store {
                 if store.freshness_check().unwrap_or(false) {
                     let results = store.query_callers(identifier).unwrap_or_default();
-                    let index_meta = store.index_meta(true);
-                    let warnings: Vec<String> = Vec::new();
-                    return emit_response(
-                        &cli.output,
-                        output::response_with_index(
-                            "callers",
-                            "callers",
-                            scoped_query(
-                                json!({ "identifier": identifier, "producer": "graph" }),
-                                &scan_opts,
+                    if !results.is_empty() {
+                        let index_meta = store.index_meta(true);
+                        let warnings: Vec<String> = Vec::new();
+                        return emit_response(
+                            &cli.output,
+                            output::response_with_index(
+                                "callers",
+                                "callers",
+                                scoped_query(
+                                    json!({ "identifier": identifier, "producer": "graph" }),
+                                    &scan_opts,
+                                ),
+                                &workspace.snapshot_id,
+                                output::inferred_candidate(),
+                                output::IndexedResponseParts::new(
+                                    index_meta,
+                                    json!(results),
+                                    warnings,
+                                ),
                             ),
-                            &workspace.snapshot_id,
-                            output::inferred_candidate(),
-                            output::IndexedResponseParts::new(index_meta, json!(results), warnings),
-                        ),
-                        &workspace,
-                        cli.save_query.as_deref(),
-                    );
+                            &workspace,
+                            cli.save_query.as_deref(),
+                        );
+                    }
                 }
             }
             // Fall back to tree-sitter

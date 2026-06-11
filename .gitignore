@@ -1,5 +1,6 @@
 /target/
 /.codetrail/
+/.code-search/
 /.pdca/
 
 # Local editor and OS files
