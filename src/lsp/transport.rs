@@ -171,7 +171,9 @@ impl JsonRpcTransport {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => return Ok(None),
-                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("LSP notification channel closed"));
+                }
             }
         }
     }

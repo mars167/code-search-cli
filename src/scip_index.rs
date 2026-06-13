@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    index, lancedb_store, scip,
+    index, lancedb_store,
+    lsp::scip_gen,
+    scip,
     scip::store::{OccurrenceResult, SymbolResult},
     workspace::{ScanOptions, Workspace},
 };
@@ -245,6 +247,9 @@ fn query_native_defs(
     if !scip::occurrence_db_fresh(&db_path, &workspace.snapshot_id, &workspace.root) {
         return Ok(None);
     }
+    if !scip_gen::generation_manifests_allow_precise_use(workspace).unwrap_or(false) {
+        return Ok(None);
+    }
     let mut results = scip::query_defs(&db_path, identifier)?;
     filter_and_limit(workspace, &mut results, opts)?;
     if results.is_empty() {
@@ -269,6 +274,9 @@ fn query_native_refs(
     if !scip::occurrence_db_fresh(&db_path, &workspace.snapshot_id, &workspace.root) {
         return Ok(None);
     }
+    if !scip_gen::generation_manifests_allow_precise_use(workspace).unwrap_or(false) {
+        return Ok(None);
+    }
     let mut results = scip::query_refs(&db_path, identifier)?;
     filter_and_limit(workspace, &mut results, opts)?;
     if results.is_empty() {
@@ -291,6 +299,9 @@ fn query_native_symbols(
 ) -> Result<Option<PreciseQueryOutput>> {
     let db_path = native_db_path(workspace);
     if !scip::occurrence_db_fresh(&db_path, &workspace.snapshot_id, &workspace.root) {
+        return Ok(None);
+    }
+    if !scip_gen::generation_manifests_allow_precise_use(workspace).unwrap_or(false) {
         return Ok(None);
     }
     let mut results = scip::query_symbols(&db_path, query)?;
@@ -559,7 +570,19 @@ fn kind_to_string(kind: &Value) -> String {
 }
 
 fn matches_identifier(record: &PreciseOccurrenceRecord, identifier: &str) -> bool {
-    record.name == identifier || record.symbol == identifier
+    record.name == identifier
+        || record.symbol == identifier
+        || matches_bare_method_name(&record.name, identifier)
+        || matches_bare_method_name(&record.symbol, identifier)
+}
+
+fn matches_bare_method_name(value: &str, identifier: &str) -> bool {
+    if identifier.is_empty() || identifier.contains('(') {
+        return false;
+    }
+    value
+        .strip_prefix(identifier)
+        .is_some_and(|suffix| suffix.starts_with('('))
 }
 
 fn record_to_json(record: PreciseOccurrenceRecord) -> Value {

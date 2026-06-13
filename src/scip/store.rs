@@ -218,19 +218,25 @@ pub fn query_defs(db_path: &Path, identifier: &str) -> Result<Vec<OccurrenceResu
         return Ok(Vec::new());
     }
     let conn = Connection::open(db_path)?;
+    let method_like = method_name_like_pattern(identifier);
 
     let mut stmt = conn.prepare(
         "SELECT s.symbol_key, o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
                 o.start_line, o.start_column, o.end_line, o.end_column, o.file_hash \
          FROM occurrences o \
          JOIN symbols s ON o.symbol_id = s.id \
-         WHERE o.role = 'definition' AND (s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1) \
-         ORDER BY o.file_path, o.start_line",
+         WHERE o.role = 'definition' AND (\
+            s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1 \
+            OR (?2 IS NOT NULL AND s.name LIKE ?2 ESCAPE '\\') \
+            OR (?2 IS NOT NULL AND s.symbol LIKE ?2 ESCAPE '\\')\
+         ) \
+         ORDER BY o.file_path, o.start_line, o.start_column",
     )?;
 
-    let results = stmt
-        .query_map(params![identifier], map_occurrence_row)?
+    let mut results = stmt
+        .query_map(params![identifier, method_like], map_occurrence_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    dedup_occurrence_results(&mut results);
 
     Ok(results)
 }
@@ -241,19 +247,25 @@ pub fn query_refs(db_path: &Path, identifier: &str) -> Result<Vec<OccurrenceResu
         return Ok(Vec::new());
     }
     let conn = Connection::open(db_path)?;
+    let method_like = method_name_like_pattern(identifier);
 
     let mut stmt = conn.prepare(
         "SELECT s.symbol_key, o.file_path, o.language, o.symbol, s.name, s.kind, o.role, \
                 o.start_line, o.start_column, o.end_line, o.end_column, o.file_hash \
          FROM occurrences o \
          JOIN symbols s ON o.symbol_id = s.id \
-         WHERE o.role = 'reference' AND (s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1) \
-         ORDER BY o.file_path, o.start_line",
+         WHERE o.role = 'reference' AND (\
+            s.name = ?1 OR s.symbol = ?1 OR s.symbol_key = ?1 \
+            OR (?2 IS NOT NULL AND s.name LIKE ?2 ESCAPE '\\') \
+            OR (?2 IS NOT NULL AND s.symbol LIKE ?2 ESCAPE '\\')\
+         ) \
+         ORDER BY o.file_path, o.start_line, o.start_column",
     )?;
 
-    let results = stmt
-        .query_map(params![identifier], map_occurrence_row)?
+    let mut results = stmt
+        .query_map(params![identifier, method_like], map_occurrence_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    dedup_occurrence_results(&mut results);
 
     Ok(results)
 }
@@ -582,6 +594,18 @@ fn map_occurrence_row(
     })
 }
 
+fn dedup_occurrence_results(results: &mut Vec<OccurrenceResult>) {
+    results.dedup_by(|a, b| {
+        a.path == b.path
+            && a.name == b.name
+            && a.role == b.role
+            && a.start_line == b.start_line
+            && a.start_column == b.start_column
+            && a.end_line == b.end_line
+            && a.end_column == b.end_column
+    });
+}
+
 fn symbol_key_for_document(path: &str, symbol: &str) -> String {
     if symbol.starts_with("local ") {
         format!("{path}:{symbol}")
@@ -619,6 +643,20 @@ fn display_name_from_symbol(symbol: &str) -> String {
         .unwrap_or(symbol)
         .trim_end_matches("().")
         .to_string()
+}
+
+fn method_name_like_pattern(identifier: &str) -> Option<String> {
+    if identifier.is_empty() || identifier.contains('(') {
+        return None;
+    }
+    Some(format!("{}(%", escape_sql_like(identifier)))
+}
+
+fn escape_sql_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 #[cfg(test)]
@@ -713,6 +751,57 @@ mod tests {
         assert_eq!(json["reliability"], "precise_fact");
         assert_eq!(json["exact"], true);
         assert_eq!(json["producer"], "scip");
+    }
+
+    #[test]
+    fn bare_method_name_matches_signature_display_names() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("occurrences.db");
+        let index = proto::Index {
+            documents: vec![proto::Document {
+                language: "java".to_string(),
+                relative_path: "src/UserService.java".to_string(),
+                occurrences: vec![
+                    proto::Occurrence {
+                        range: vec![2, 16, 2, 30],
+                        symbol: "semanticdb maven . . UserService#selectUserById().".to_string(),
+                        symbol_roles: 1,
+                        ..Default::default()
+                    },
+                    proto::Occurrence {
+                        range: vec![8, 22, 8, 36],
+                        symbol: "semanticdb maven . . UserService#selectUserById().".to_string(),
+                        symbol_roles: 0,
+                        ..Default::default()
+                    },
+                ],
+                symbols: vec![proto::SymbolInformation {
+                    symbol: "semanticdb maven . . UserService#selectUserById().".to_string(),
+                    kind: proto::symbol_information::Kind::Method as i32,
+                    display_name: "selectUserById(Long)".to_string(),
+                    ..Default::default()
+                }],
+                position_encoding: proto::PositionEncoding::Utf8CodeUnitOffsetFromLineStart as i32,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        build_occurrences_db(&index, &db_path, "snapshot-v1", dir.path()).unwrap();
+
+        let defs = query_defs(&db_path, "selectUserById").unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "selectUserById(Long)");
+
+        let refs = query_refs(&db_path, "selectUserById").unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].role, "reference");
+
+        assert_eq!(
+            query_defs(&db_path, "selectUserById(Long)").unwrap().len(),
+            1
+        );
+        assert!(query_defs(&db_path, "selectUser").unwrap().is_empty());
     }
 
     #[test]

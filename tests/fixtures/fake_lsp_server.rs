@@ -1,13 +1,31 @@
 //! Minimal LSP server for integration tests.
 //! Responds to initialize, documentSymbol, references, and shutdown.
 
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Write},
+    time::Duration,
+};
 
 fn main() {
+    let language_status_delay_ms = language_status_delay_ms();
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
     while let Some(message) = read_message(&mut reader) {
+        if message.get("method").and_then(|v| v.as_str()) == Some("initialized")
+            && message.get("id").is_none()
+        {
+            if let Some(delay_ms) = language_status_delay_ms {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                let notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "language/status",
+                    "params": { "type": 2, "message": "ready" }
+                });
+                write_message(&mut stdout, &notification).ok();
+            }
+            continue;
+        }
         if message.get("method").is_some() && message.get("id").is_none() {
             continue;
         }
@@ -41,6 +59,13 @@ fn main() {
             break;
         }
     }
+}
+
+fn language_status_delay_ms() -> Option<u64> {
+    std::env::args().skip(1).find_map(|arg| {
+        arg.strip_prefix("--language-status-delay-ms=")
+            .and_then(|value| value.parse().ok())
+    })
 }
 
 fn document_symbols(uri: &str) -> serde_json::Value {

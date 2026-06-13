@@ -28,6 +28,7 @@ pub mod builder;
 pub mod schema;
 
 use std::{
+    collections::HashSet,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -298,7 +299,11 @@ impl GraphBackend for PetgraphBackend {
                 .cmp(&b.path)
                 .then(a.enclosing_symbol.cmp(&b.enclosing_symbol))
                 .then(a.target.cmp(&b.target))
+                .then(candidate_start_line(a).cmp(&candidate_start_line(b)))
+                .then(candidate_start_column(a).cmp(&candidate_start_column(b)))
         });
+        prefer_scip_precise_candidates(&mut results);
+        results.dedup_by(|a, b| same_candidate_site(a, b));
 
         Ok(results)
     }
@@ -327,7 +332,11 @@ impl GraphBackend for PetgraphBackend {
                 .cmp(&b.path)
                 .then(a.enclosing_symbol.cmp(&b.enclosing_symbol))
                 .then(a.target.cmp(&b.target))
+                .then(candidate_start_line(a).cmp(&candidate_start_line(b)))
+                .then(candidate_start_column(a).cmp(&candidate_start_column(b)))
         });
+        prefer_scip_precise_candidates(&mut results);
+        results.dedup_by(|a, b| same_candidate_site(a, b));
 
         Ok(results)
     }
@@ -351,8 +360,8 @@ impl PetgraphBackend {
             let node = &self.graph[*idx];
             node.display_name == identifier
                 || (query_is_simple
-                    && (last_identifier(&node.display_name) == identifier
-                        || last_identifier(&node.id) == identifier))
+                    && (matches_simple_identifier(&node.display_name, identifier)
+                        || matches_simple_identifier(&node.id, identifier)))
         }) {
             if !matches.contains(&idx) {
                 matches.push(idx);
@@ -412,11 +421,73 @@ fn node_display_name(node: &GraphNode) -> String {
     }
 }
 
+fn candidate_start_line(candidate: &CallCandidate) -> u64 {
+    candidate.range["start"]["line"].as_u64().unwrap_or(0)
+}
+
+fn candidate_start_column(candidate: &CallCandidate) -> u64 {
+    candidate.range["start"]["column"].as_u64().unwrap_or(0)
+}
+
+fn same_candidate_site(a: &CallCandidate, b: &CallCandidate) -> bool {
+    a.path == b.path
+        && a.enclosing_symbol == b.enclosing_symbol
+        && a.target == b.target
+        && a.source == b.source
+        && candidate_start_line(a) == candidate_start_line(b)
+        && candidate_start_column(a) == candidate_start_column(b)
+}
+
+fn prefer_scip_precise_candidates(results: &mut Vec<CallCandidate>) {
+    let precise_sites: HashSet<_> = results
+        .iter()
+        .filter(|candidate| candidate.source == "scip_precise")
+        .map(candidate_normalized_site)
+        .collect();
+    results.retain(|candidate| {
+        candidate.source == "scip_precise"
+            || !precise_sites.contains(&candidate_normalized_site(candidate))
+    });
+}
+
+fn candidate_normalized_site(candidate: &CallCandidate) -> CandidateSite {
+    CandidateSite {
+        path: candidate.path.clone(),
+        enclosing_symbol: candidate
+            .enclosing_symbol
+            .as_deref()
+            .map(method_base_identifier)
+            .map(ToString::to_string),
+        target: method_base_identifier(&candidate.target).to_string(),
+        line: candidate_start_line(candidate),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CandidateSite {
+    path: String,
+    enclosing_symbol: Option<String>,
+    target: String,
+    line: u64,
+}
+
 fn last_identifier(target: &str) -> &str {
     target
         .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .find(|part| !part.is_empty())
         .unwrap_or(target)
+}
+
+fn matches_simple_identifier(target: &str, identifier: &str) -> bool {
+    last_identifier(target) == identifier || method_base_identifier(target) == identifier
+}
+
+fn method_base_identifier(target: &str) -> &str {
+    let before_signature = target
+        .split_once('(')
+        .map(|(head, _)| head)
+        .unwrap_or(target);
+    last_identifier(before_signature)
 }
 
 #[cfg(test)]
@@ -491,6 +562,102 @@ mod tests {
         assert_eq!(callers[0].target, "bar");
         assert_eq!(callers[0].level, "inferred_candidate");
         assert_eq!(callers[0].enclosing_symbol, Some("foo".to_string()));
+    }
+
+    #[test]
+    fn graph_preserves_multiple_call_sites_between_same_nodes() {
+        let mut backend = PetgraphBackend::empty();
+        let caller = make_test_node("caller", NodeKind::Function);
+        let callee = make_test_node("callee", NodeKind::Function);
+        backend.ensure_node(caller);
+        backend.ensure_node(callee);
+
+        let caller_idx = *backend.node_by_id.get("caller").unwrap();
+        let callee_idx = *backend.node_by_id.get("callee").unwrap();
+        let first = make_test_edge("caller", "callee", "src/lib.rs", EdgeSource::ScipPrecise);
+        let mut second = make_test_edge("caller", "callee", "src/lib.rs", EdgeSource::ScipPrecise);
+        second.call_line = 8;
+        second.call_column = 4;
+        backend.graph.add_edge(caller_idx, callee_idx, first);
+        backend.graph.add_edge(caller_idx, callee_idx, second);
+
+        let callers = backend.query_callers("callee").unwrap();
+        assert_eq!(callers.len(), 2);
+        assert_eq!(callers[0].range["start"]["line"], 5);
+        assert_eq!(callers[1].range["start"]["line"], 8);
+    }
+
+    #[test]
+    fn graph_prefers_scip_over_tree_sitter_at_same_call_site() {
+        let mut backend = PetgraphBackend::empty();
+        let caller = make_test_node("run", NodeKind::Function);
+        let callee = make_test_node("helper", NodeKind::Function);
+        let mut precise_caller = make_test_node("run(String)", NodeKind::Function);
+        precise_caller.display_name = "run(String)".to_string();
+        let mut precise_callee = make_test_node("helper(Long)", NodeKind::Function);
+        precise_callee.display_name = "helper(Long)".to_string();
+        backend.ensure_node(caller);
+        backend.ensure_node(callee);
+        backend.ensure_node(precise_caller);
+        backend.ensure_node(precise_callee);
+
+        let tree_caller_idx = *backend.node_by_id.get("run").unwrap();
+        let tree_callee_idx = *backend.node_by_id.get("helper").unwrap();
+        let precise_caller_idx = *backend.node_by_id.get("run(String)").unwrap();
+        let precise_callee_idx = *backend.node_by_id.get("helper(Long)").unwrap();
+        backend.graph.add_edge(
+            tree_caller_idx,
+            tree_callee_idx,
+            make_test_edge(
+                "run",
+                "helper",
+                "src/lib.rs",
+                EdgeSource::TreeSitterHeuristic,
+            ),
+        );
+        backend.graph.add_edge(
+            precise_caller_idx,
+            precise_callee_idx,
+            make_test_edge(
+                "run(String)",
+                "helper(Long)",
+                "src/lib.rs",
+                EdgeSource::ScipPrecise,
+            ),
+        );
+
+        let callers = backend.query_callers("helper").unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].source, "scip_precise");
+        assert_eq!(callers[0].target, "helper(Long)");
+    }
+
+    #[test]
+    fn graph_returns_same_symbol_call_edges() {
+        let mut backend = PetgraphBackend::empty();
+        let node = make_test_node("selectJobById(Long)", NodeKind::Function);
+        backend.ensure_node(node);
+
+        let node_idx = *backend.node_by_id.get("selectJobById(Long)").unwrap();
+        let edge = make_test_edge(
+            "selectJobById(Long)",
+            "selectJobById(Long)",
+            "src/SysJobServiceImpl.java",
+            EdgeSource::ScipPrecise,
+        );
+        backend.graph.add_edge(node_idx, node_idx, edge);
+
+        let callers = backend.query_callers("selectJobById(Long)").unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(
+            callers[0].enclosing_symbol,
+            Some("selectJobById(Long)".to_string())
+        );
+        assert_eq!(callers[0].source, "scip_precise");
+
+        let bare_callers = backend.query_callers("selectJobById").unwrap();
+        assert_eq!(bare_callers.len(), 1);
+        assert_eq!(bare_callers[0].source, "scip_precise");
     }
 
     #[test]

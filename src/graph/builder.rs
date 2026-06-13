@@ -19,9 +19,10 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use petgraph::visit::EdgeRef;
+use petgraph::{graph::NodeIndex, visit::EdgeRef};
 
 use crate::{
+    lsp::scip_gen,
     scip,
     scip_index::native_db_path,
     syntax,
@@ -66,12 +67,84 @@ struct ScipDefinition {
     end_column: u32,
 }
 
+fn enclosing_definition<'a>(
+    def_locations: &'a HashMap<String, ScipDefinition>,
+    path: &str,
+    start_line: u32,
+    start_column: u32,
+    end_line: u32,
+    end_column: u32,
+) -> Option<&'a ScipDefinition> {
+    def_locations
+        .values()
+        .filter(|definition| definition.path == path)
+        .filter(|definition| {
+            range_contains(
+                definition.start_line,
+                definition.start_column,
+                definition.end_line,
+                definition.end_column,
+                start_line,
+                start_column,
+                end_line,
+                end_column,
+            )
+        })
+        .max_by_key(|definition| (definition.start_line, definition.start_column))
+        .or_else(|| {
+            def_locations
+                .values()
+                .filter(|definition| definition.path == path)
+                .filter(|definition| {
+                    (definition.start_line, definition.start_column) <= (start_line, start_column)
+                })
+                .max_by_key(|definition| (definition.start_line, definition.start_column))
+        })
+}
+
+fn range_contains(
+    outer_start_line: u32,
+    outer_start_column: u32,
+    outer_end_line: u32,
+    outer_end_column: u32,
+    inner_start_line: u32,
+    inner_start_column: u32,
+    inner_end_line: u32,
+    inner_end_column: u32,
+) -> bool {
+    (outer_start_line, outer_start_column) <= (inner_start_line, inner_start_column)
+        && (outer_end_line, outer_end_column) >= (inner_end_line, inner_end_column)
+}
+
+fn edge_exists_at_site(
+    backend: &PetgraphBackend,
+    caller_idx: NodeIndex,
+    callee_idx: NodeIndex,
+    file_path: &str,
+    call_line: u32,
+    call_column: u32,
+) -> bool {
+    backend
+        .graph
+        .edges_directed(caller_idx, petgraph::Direction::Outgoing)
+        .any(|edge| {
+            let meta = edge.weight();
+            edge.target() == callee_idx
+                && meta.file_path == file_path
+                && meta.call_line == call_line
+                && meta.call_column == call_column
+        })
+}
+
 fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
     let db_path = native_db_path(workspace);
     if !db_path.exists() {
         return;
     }
     if !scip::occurrence_db_fresh(&db_path, &workspace.snapshot_id, &workspace.root) {
+        return;
+    }
+    if !scip_gen::generation_manifests_allow_precise_use(workspace).unwrap_or(false) {
         return;
     }
     // Read all symbols with their definitions
@@ -118,17 +191,16 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
             continue;
         };
         for r in refs {
-            let enclosing = def_locations
-                .values()
-                .filter(|definition| definition.path == r.path)
-                .filter(|definition| definition.start_line <= r.start_line)
-                .max_by_key(|definition| definition.start_line);
+            let enclosing = enclosing_definition(
+                &def_locations,
+                &r.path,
+                r.start_line,
+                r.start_column,
+                r.end_line,
+                r.end_column,
+            );
 
             if let Some(caller) = enclosing {
-                if caller.symbol_key == r.symbol_key {
-                    continue;
-                }
-
                 backend.ensure_node(GraphNode {
                     id: r.symbol_key.clone(),
                     display_name: r.name.clone(),
@@ -148,12 +220,14 @@ fn build_from_scip(backend: &mut PetgraphBackend, workspace: &Workspace) {
                     continue;
                 };
 
-                let edge_exists = backend
-                    .graph
-                    .edges_directed(caller_idx, petgraph::Direction::Outgoing)
-                    .any(|e| e.target() == callee_idx);
-
-                if !edge_exists {
+                if !edge_exists_at_site(
+                    backend,
+                    caller_idx,
+                    callee_idx,
+                    &r.path,
+                    r.start_line,
+                    r.start_column,
+                ) {
                     backend.graph.add_edge(
                         caller_idx,
                         callee_idx,
@@ -238,13 +312,9 @@ fn build_tree_sitter_edges(backend: &mut PetgraphBackend, workspace: &Workspace)
         let caller_idx = backend.node_by_id[&caller_id];
         let callee_idx = backend.node_by_id[&callee_id];
 
-        // Skip if an edge already exists (SCIP edges take precedence)
-        let edge_exists = backend
-            .graph
-            .edges_directed(caller_idx, petgraph::Direction::Outgoing)
-            .any(|e| e.target() == callee_idx);
-
-        if !edge_exists {
+        if !edge_exists_at_site(
+            backend, caller_idx, callee_idx, &call.path, call_line, call_col,
+        ) {
             backend.graph.add_edge(
                 caller_idx,
                 callee_idx,

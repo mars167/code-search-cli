@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::registry::{path_to_uri, ReadinessStrategy, ServerSpec};
@@ -130,11 +130,12 @@ impl LspClient {
                 loop {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
-                        return Err(anyhow!("jdtls language/status readiness timed out"));
+                        return Ok(());
                     }
+                    let wait_for = remaining.min(Duration::from_secs(1));
                     if let Some(notification) = self
                         .transport
-                        .wait_notification("language/status", remaining)?
+                        .wait_notification("language/status", wait_for)?
                     {
                         if notification
                             .get("params")
@@ -144,11 +145,8 @@ impl LspClient {
                         {
                             return Ok(());
                         }
-                    } else {
-                        break;
                     }
                 }
-                Ok(())
             }
         }
     }
