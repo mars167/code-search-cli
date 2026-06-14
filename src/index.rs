@@ -1433,26 +1433,7 @@ pub fn unpack(workspace: &Workspace, archive_path: &str) -> Result<Value> {
     let checksums_str = String::from_utf8(checksums_data.clone())
         .with_context(|| "checksums.txt is not valid UTF-8")?;
     let expected_checksums = parse_checksums(&checksums_str)?;
-
-    for (path, expected_hash) in &expected_checksums {
-        if path == "checksums.txt" {
-            continue;
-        }
-        let content = entries
-            .get(path.as_str())
-            .ok_or_else(|| anyhow!("archive missing entry: {path}"))?;
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let actual_hash = format!("{:x}", hasher.finalize());
-        if &actual_hash != expected_hash {
-            return Err(anyhow!(
-                "checksum mismatch for '{}': expected {}, got {}",
-                path,
-                expected_hash,
-                actual_hash
-            ));
-        }
-    }
+    verify_archive_checksums(&entries, &expected_checksums)?;
 
     // Read pack manifest
     let pack_manifest_data = entries
@@ -1674,6 +1655,44 @@ fn parse_checksums(checksums_str: &str) -> Result<std::collections::HashMap<Stri
     Ok(map)
 }
 
+fn verify_archive_checksums(
+    entries: &std::collections::HashMap<String, Vec<u8>>,
+    expected_checksums: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    for path in entries.keys() {
+        if path == "checksums.txt" {
+            continue;
+        }
+        if !expected_checksums.contains_key(path) {
+            return Err(anyhow!(
+                "archive entry '{path}' is not listed in checksums.txt"
+            ));
+        }
+    }
+
+    for (path, expected_hash) in expected_checksums {
+        if path == "checksums.txt" {
+            continue;
+        }
+        let content = entries
+            .get(path.as_str())
+            .ok_or_else(|| anyhow!("archive missing entry: {path}"))?;
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if &actual_hash != expected_hash {
+            return Err(anyhow!(
+                "checksum mismatch for '{}': expected {}, got {}",
+                path,
+                expected_hash,
+                actual_hash
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn pack_temp_dir(workspace: &Workspace, label: &str) -> Result<PathBuf> {
     let dir = storage_root(workspace).join(format!(
         ".pack-tmp-{label}-{}-{}",
@@ -1703,16 +1722,12 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     }
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
-        return Err(anyhow!(
-            "archive entry has an absolute path: {rel}"
-        ));
+        return Err(anyhow!("archive entry has an absolute path: {rel}"));
     }
     for component in rel_path.components() {
         match component {
             std::path::Component::ParentDir => {
-                return Err(anyhow!(
-                    "archive entry contains '..' path component: {rel}"
-                ));
+                return Err(anyhow!("archive entry contains '..' path component: {rel}"));
             }
             std::path::Component::Prefix(_) => {
                 return Err(anyhow!(
@@ -1940,16 +1955,35 @@ mod tests {
     #[test]
     fn safe_join_rejects_absolute_paths() {
         let err = safe_join(&base(), "/etc/passwd").unwrap_err();
-        assert!(
-            err.to_string().contains("absolute"),
-            "error: {err}"
-        );
+        assert!(err.to_string().contains("absolute"), "error: {err}");
     }
 
     #[test]
     fn safe_join_rejects_empty_path() {
         let err = safe_join(&base(), "").unwrap_err();
         assert!(err.to_string().contains("empty"), "error: {err}");
+    }
+
+    #[test]
+    fn checksum_validation_rejects_unlisted_archive_entries() {
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("checksums.txt".to_string(), Vec::new());
+        entries.insert("manifest.json".to_string(), b"{}".to_vec());
+        entries.insert("text/docs.idx".to_string(), b"unverified".to_vec());
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"{}");
+        let mut expected = std::collections::HashMap::new();
+        expected.insert(
+            "manifest.json".to_string(),
+            format!("{:x}", hasher.finalize()),
+        );
+
+        let err = verify_archive_checksums(&entries, &expected).unwrap_err();
+        assert!(
+            err.to_string().contains("not listed in checksums.txt"),
+            "error: {err}"
+        );
     }
 
     #[test]

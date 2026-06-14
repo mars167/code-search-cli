@@ -85,8 +85,13 @@ fn build_raw_tar_gz(extra_entries: &[(&str, &[u8])]) -> Vec<u8> {
 
     let manifest = pack_manifest_bytes();
 
-    // Compute checksums for extra entries only
     let mut checksums = String::new();
+    let mut manifest_hasher = Sha256::new();
+    manifest_hasher.update(&manifest);
+    checksums.push_str(&format!(
+        "{:x}  manifest.json\n",
+        manifest_hasher.finalize()
+    ));
     for (path, content) in extra_entries {
         let mut hasher = Sha256::new();
         hasher.update(content);
