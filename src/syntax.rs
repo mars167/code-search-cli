@@ -563,6 +563,9 @@ fn parse_candidates_in_file(
     budget: CandidateBudget,
     root_ids: &BTreeMap<String, String>,
 ) -> Result<(Vec<TreeSitterCandidate>, Vec<String>)> {
+    if file.size > crate::workspace::MAX_FILE_BYTES {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let path = workspace.abs_path(&file.path);
     let Some(language) = parser_language(&path) else {
         return Ok((Vec::new(), Vec::new()));

@@ -7,7 +7,14 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::workspace::FileRecord;
+use crate::workspace::{FileRecord, MAX_FILE_BYTES};
+
+/// Maximum number of file records accepted from a remote docs index.
+const MAX_INDEX_DOCS: usize = 2_000_000;
+/// Maximum number of doc IDs in a single gram posting list.
+const MAX_POSTING_IDS: usize = 2_000_000;
+/// Maximum byte length of a string field read from an index file.
+const MAX_STRING_BYTES: usize = 4096;
 
 const DOCS_MAGIC: &[u8; 8] = b"CSDOCS1\0";
 const GRAMS_MAGIC: &[u8; 8] = b"CSGRAM1\0";
@@ -36,6 +43,9 @@ pub fn write_grams(path: &Path, root: &Path, records: &[FileRecord]) -> Result<(
     }
     let mut gram_index: BTreeMap<[u8; 3], Vec<u32>> = BTreeMap::new();
     for (doc_id, record) in records.iter().enumerate() {
+        if record.size > MAX_FILE_BYTES {
+            continue;
+        }
         let bytes = match fs::read(root.join(&record.path)) {
             Ok(bytes) => bytes,
             Err(_) => continue,
@@ -71,6 +81,13 @@ pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     read_magic(&mut file, DOCS_MAGIC)?;
     let count = read_u32(&mut file)? as usize;
+    if count > MAX_INDEX_DOCS {
+        return Err(anyhow!(
+            "docs index count {} exceeds maximum {}",
+            count,
+            MAX_INDEX_DOCS
+        ));
+    }
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         let path = read_string(&mut file)?;
@@ -138,6 +155,13 @@ fn read_selected_grams(
         let mut gram = [0u8; 3];
         file.read_exact(&mut gram)?;
         let ids_len = read_u32(&mut file)? as usize;
+        if ids_len > MAX_POSTING_IDS {
+            return Err(anyhow!(
+                "gram posting count {} exceeds maximum {}",
+                ids_len,
+                MAX_POSTING_IDS
+            ));
+        }
         if wanted.contains(&gram) {
             let mut ids = Vec::with_capacity(ids_len);
             for _ in 0..ids_len {
@@ -169,6 +193,13 @@ fn read_magic(file: &mut File, expected: &[u8; 8]) -> Result<()> {
 
 fn read_string(file: &mut File) -> Result<String> {
     let len = read_u32(file)? as usize;
+    if len > MAX_STRING_BYTES {
+        return Err(anyhow!(
+            "string length {} exceeds maximum {}",
+            len,
+            MAX_STRING_BYTES
+        ));
+    }
     let mut bytes = vec![0u8; len];
     file.read_exact(&mut bytes)?;
     Ok(String::from_utf8(bytes)?)

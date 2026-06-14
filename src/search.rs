@@ -282,6 +282,9 @@ pub fn find(
         output_budget(repository_files, repository_bytes, 0, opts.limit, context);
     let mut results = Vec::new();
     for file in source.records {
+        if file.record.size > crate::workspace::MAX_FILE_BYTES {
+            continue;
+        }
         let path = workspace.abs_path(&file.record.path);
         let content = match fs::read_to_string(&path) {
             Ok(content) => content,

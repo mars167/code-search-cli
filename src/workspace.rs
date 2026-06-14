@@ -17,6 +17,10 @@ use crate::{
     search_pattern::{compile_any, normalize_extension, PatternTarget, SearchPatternMode},
 };
 
+/// Maximum file size that CodeTrail will read into memory for indexing or search.
+/// Files larger than this limit are skipped with a `too_large` caveat.
+pub const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     pub dirs: Vec<String>,
@@ -296,6 +300,19 @@ impl Workspace {
                         continue;
                     }
                 };
+                if metadata.len() > MAX_FILE_BYTES {
+                    skipped.push(SkippedFile::with_message(
+                        rel,
+                        "catalog",
+                        "too_large",
+                        format!(
+                            "file size {} exceeds limit {}",
+                            metadata.len(),
+                            MAX_FILE_BYTES
+                        ),
+                    ));
+                    continue;
+                }
                 match probably_binary_result(path) {
                     Ok(true) => {
                         skipped.push(SkippedFile::new(rel, "catalog", "binary"));
@@ -674,6 +691,14 @@ fn materialized_file_for_catalog(
     file: &FileCatalogRecord,
     read_file: impl FnOnce() -> std::io::Result<Vec<u8>>,
 ) -> std::result::Result<MaterializedFile, SkippedFile> {
+    if file.size > MAX_FILE_BYTES {
+        return Err(SkippedFile::with_message(
+            file.path.clone(),
+            "materialize",
+            "too_large",
+            format!("file size {} exceeds limit {}", file.size, MAX_FILE_BYTES),
+        ));
+    }
     let content = read_file().map_err(|error| {
         SkippedFile::with_message(
             file.path.clone(),
