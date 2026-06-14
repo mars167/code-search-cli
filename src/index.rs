@@ -20,7 +20,7 @@ use crate::{
     snapshot_store, text_index,
     workspace::{
         read_staged_blob, staged_tree, tracked_files, FileRecord, MaterializedIndexData,
-        ScanOptions, Workspace,
+        RemoteMode, ScanOptions, Workspace,
     },
 };
 
@@ -448,6 +448,9 @@ pub fn indexed_file_records(
     workspace: &Workspace,
     opts: &ScanOptions,
 ) -> Result<Option<IndexedRecords>> {
+    if opts.remote_mode == RemoteMode::Only || opts.remote_snapshot.is_some() {
+        return remote_indexed_records(workspace, opts, None);
+    }
     let Some(local) = local_text_snapshot(workspace, opts)? else {
         return Ok(
             remote_fallback_text_records(workspace, opts, None)?.map(|(records, index)| {
@@ -472,6 +475,9 @@ pub fn indexed_text_records(
     pattern: &str,
     mode: &str,
 ) -> Result<Option<IndexedRecords>> {
+    if opts.remote_mode == RemoteMode::Only || opts.remote_snapshot.is_some() {
+        return remote_indexed_records(workspace, opts, Some((pattern, mode)));
+    }
     let Some(local) = local_text_snapshot(workspace, opts)? else {
         return Ok(
             remote_fallback_text_records(workspace, opts, Some((pattern, mode)))?.map(
@@ -489,6 +495,31 @@ pub fn indexed_text_records(
 
     indexed_records_from_local(workspace, opts, local, Some((pattern, mode)))
 }
+
+fn remote_indexed_records(
+    workspace: &Workspace,
+    opts: &ScanOptions,
+    filter: Option<(&str, &str)>,
+) -> Result<Option<IndexedRecords>> {
+    remote_fallback_text_records(workspace, opts, filter)?.map_or_else(
+        || {
+            Err(anyhow!(
+                "remote_snapshot_unavailable: no matching remote text snapshot is available"
+            ))
+        },
+        |(records, index)| {
+            Ok(Some(IndexedRecords {
+                indexed_paths: records.iter().map(|record| record.path.clone()).collect(),
+                records,
+                index,
+                overlay_paths: BTreeSet::new(),
+                stale_paths: BTreeSet::new(),
+                missing_paths: BTreeSet::new(),
+            }))
+        },
+    )
+}
+
 /// Fall back to remote snapshots when local text index is not fresh or missing.
 fn remote_fallback_text_records(
     workspace: &Workspace,
@@ -501,6 +532,9 @@ fn remote_fallback_text_records(
             Ok(manifest) => manifest,
             Err(_) => continue,
         };
+        if !selected_remote_matches(opts, snapshot_key, &manifest.snapshot_id) {
+            continue;
+        }
         if manifest.scan_options != IndexScanOptions::from(opts) {
             continue;
         }
@@ -549,6 +583,13 @@ fn remote_fallback_text_records(
     }
 
     Ok(None)
+}
+
+fn selected_remote_matches(opts: &ScanOptions, snapshot_key: &str, snapshot_id: &str) -> bool {
+    opts.remote_snapshot
+        .as_deref()
+        .map(|selected| selected == snapshot_key || selected == snapshot_id)
+        .unwrap_or(true)
 }
 
 fn lancedb_candidate_ids(
@@ -1272,7 +1313,7 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
     }
 
     // text index segments
-    for seg_name in &["docs.idx", "paths.idx", "grams.idx"] {
+    for seg_name in &["docs.idx", "paths.idx", "grams.idx", "content.idx"] {
         let seg_path = text_dir.join(seg_name);
         if seg_path.exists() {
             let rel = format!("text/{seg_name}");
@@ -1282,8 +1323,9 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
     }
     let has_docs = entries.iter().any(|entry| entry.name == "text/docs.idx");
     let has_grams = entries.iter().any(|entry| entry.name == "text/grams.idx");
+    let has_content = entries.iter().any(|entry| entry.name == "text/content.idx");
     if let Some(records) = &lancedb_records {
-        if !has_docs || !has_grams {
+        if !has_docs || !has_grams || !has_content {
             let tmp = pack_temp_dir(workspace, "text")?;
             if !has_docs {
                 let docs_path = tmp.join("docs.idx");
@@ -1299,6 +1341,14 @@ pub fn pack(workspace: &Workspace, output_path: &str) -> Result<Value> {
                 entries.push(ArchiveEntry {
                     name: "text/grams.idx".to_string(),
                     content: fs::read(grams_path)?,
+                });
+            }
+            if !has_content {
+                let content_path = tmp.join("content.idx");
+                text_index::write_contents(&content_path, &workspace.root, records)?;
+                entries.push(ArchiveEntry {
+                    name: "text/content.idx".to_string(),
+                    content: fs::read(content_path)?,
                 });
             }
             let _ = fs::remove_dir_all(tmp);

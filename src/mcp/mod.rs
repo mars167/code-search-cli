@@ -31,6 +31,7 @@ use crate::{
     query::{QueryOptions, QueryService},
     query_input::InputMode,
     search_pattern::SearchPatternMode,
+    workspace::RemoteMode,
 };
 
 mod protocol;
@@ -47,6 +48,28 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "codetrail";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn with_remote_query_schema(mut schema: Value) -> Value {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(
+            "remoteMode".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["auto", "only"],
+                "default": "auto",
+                "description": "Remote snapshot selection mode. Use only to query remote text snapshots without local source reads."
+            }),
+        );
+        properties.insert(
+            "remoteSnapshot".to_string(),
+            json!({
+                "type": "string",
+                "description": "Remote snapshot key or snapshot id to query when remoteMode is only or a specific remote snapshot is required."
+            }),
+        );
+    }
+    schema
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions  (static so we can serve tools/list without I/O)
 // ---------------------------------------------------------------------------
@@ -59,7 +82,7 @@ fn tool_definitions() -> Vec<ToolDef> {
             description:
                 "Full-text / literal search across the codebase. Returns matching lines with file paths and line numbers."
                     .to_string(),
-            input_schema: json!({
+            input_schema: with_remote_query_schema(json!({
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "Literal text to search for" },
@@ -79,13 +102,13 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "context": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Lines of context around each match" }
                 },
                 "required": ["text"]
-            }),
+            })),
         },
         ToolDef {
             name: "codetrail_grep".to_string(),
             description: "Regex search across the codebase. Returns matching lines with file paths and line numbers."
                 .to_string(),
-            input_schema: json!({
+            input_schema: with_remote_query_schema(json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Regular expression pattern" },
@@ -105,14 +128,14 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "context": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 0, "description": "Lines of context around each match" }
                 },
                 "required": ["pattern"]
-            }),
+            })),
         },
         ToolDef {
             name: "codetrail_files".to_string(),
             description:
                 "Find files whose path contains the given substring. Returns file metadata."
                     .to_string(),
-            input_schema: json!({
+            input_schema: with_remote_query_schema(json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Substring to match in file paths" },
@@ -131,13 +154,13 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
-            }),
+            })),
         },
         ToolDef {
             name: "codetrail_glob".to_string(),
             description: "Find files matching a strict glob pattern (e.g. `**/*.rs`). Returns file metadata."
                 .to_string(),
-            input_schema: json!({
+            input_schema: with_remote_query_schema(json!({
                 "type": "object",
                 "properties": {
                     "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs)" },
@@ -156,7 +179,7 @@ fn tool_definitions() -> Vec<ToolDef> {
                     "limit": { "type": "integer", "minimum": 0, "default": 100, "description": "Max results" }
                 },
                 "required": ["pattern"]
-            }),
+            })),
         },
         ToolDef {
             name: "codetrail_list".to_string(),
@@ -712,6 +735,12 @@ fn parse_query_options(args: Option<&Value>) -> Result<QueryOptions> {
             .unwrap_or(false),
         limit: optional_usize_arg(obj, "limit", 100)?,
         context: optional_u16_arg(obj, "context", 0)?,
+        remote_mode: optional_remote_mode(obj)?,
+        remote_snapshot: obj
+            .get("remoteSnapshot")
+            .or_else(|| obj.get("remote_snapshot"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
     })
 }
 
@@ -807,6 +836,23 @@ fn optional_input_mode(
         "strict" => Ok(InputMode::Strict),
         other => Err(anyhow::anyhow!(
             "invalid_mcp_argument: unsupported inputMode {other}"
+        )),
+    }
+}
+
+fn optional_remote_mode(obj: &serde_json::Map<String, Value>) -> Result<RemoteMode> {
+    let Some(value) = obj
+        .get("remoteMode")
+        .or_else(|| obj.get("remote_mode"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(RemoteMode::Auto);
+    };
+    match value {
+        "auto" => Ok(RemoteMode::Auto),
+        "only" => Ok(RemoteMode::Only),
+        other => Err(anyhow::anyhow!(
+            "invalid_mcp_argument: unsupported remoteMode {other}"
         )),
     }
 }

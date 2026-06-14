@@ -234,6 +234,7 @@ fn query_options_from_saved(saved: &Value, snapshot_match: bool) -> Result<Query
         allow_broad: bool_field(scope, "allowBroad"),
         limit: scope.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize,
         context: query.get("context").and_then(Value::as_u64).unwrap_or(0) as u16,
+        ..QueryOptions::default()
     })
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
@@ -15,7 +15,7 @@ use crate::{
     search_pattern::{PatternMatcher, PatternTarget, SearchPatternMode},
     workspace::{
         language_for_path, matches_filters, matches_lang, FileCatalogRecord, FileRecord,
-        ScanOptions, Workspace,
+        RemoteMode, ScanOptions, Workspace,
     },
 };
 
@@ -282,10 +282,15 @@ pub fn find(
         output_budget(repository_files, repository_bytes, 0, opts.limit, context);
     let mut results = Vec::new();
     for file in source.records {
-        let path = workspace.abs_path(&file.record.path);
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => continue,
+        let content = match file.body {
+            TextBody::Snapshot(content) => content,
+            TextBody::Local => {
+                let path = workspace.abs_path(&file.record.path);
+                match fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                }
+            }
         };
         for mat in regex.find_iter(&content) {
             if refs_mode && !identifier_boundary(&content, mat.start(), mat.end()) {
@@ -991,7 +996,9 @@ pub fn scope_value(opts: &ScanOptions) -> Value {
         "noIgnore": opts.no_ignore,
         "cursor": &opts.cursor,
         "allowBroad": opts.allow_broad,
-        "limit": opts.limit
+        "limit": opts.limit,
+        "remoteMode": opts.remote_mode.as_str(),
+        "remoteSnapshot": &opts.remote_snapshot
     })
 }
 
@@ -1010,7 +1017,9 @@ fn pagination_scope_value(opts: &ScanOptions) -> Value {
         "hidden": opts.hidden,
         "noIgnore": opts.no_ignore,
         "allowBroad": opts.allow_broad,
-        "limit": opts.limit
+        "limit": opts.limit,
+        "remoteMode": opts.remote_mode.as_str(),
+        "remoteSnapshot": &opts.remote_snapshot
     })
 }
 
@@ -1129,6 +1138,12 @@ struct FileEntry {
 struct TextFileEntry {
     record: FileRecord,
     source: CandidateSource,
+    body: TextBody,
+}
+
+enum TextBody {
+    Local,
+    Snapshot(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1201,12 +1216,20 @@ impl FileEntry {
 }
 
 impl TextFileEntry {
-    fn indexed(record: FileRecord, source: CandidateSource) -> Self {
-        Self { record, source }
+    fn indexed_with_body(record: FileRecord, source: CandidateSource, body: TextBody) -> Self {
+        Self {
+            record,
+            source,
+            body,
+        }
     }
 
     fn live(record: FileRecord, source: CandidateSource) -> Self {
-        Self { record, source }
+        Self {
+            record,
+            source,
+            body: TextBody::Local,
+        }
     }
 }
 
@@ -1276,9 +1299,22 @@ fn candidate_text_files(
         if let Some(indexed) = index::indexed_text_records(workspace, opts, pattern, mode.as_str())?
         {
             let indexed_source = indexed_candidate_source(&indexed.index);
+            let remote_contents = remote_content_map(&indexed.index)?;
+            if remote_contents.is_none() && remote_content_required(opts, &indexed.index) {
+                return Err(anyhow!(
+                    "remote_snapshot_unavailable: selected remote text snapshot has no content segment"
+                ));
+            }
             let mut records = filter_records(indexed.records, opts)
                 .into_iter()
-                .map(|record| TextFileEntry::indexed(record, indexed_source))
+                .map(|record| {
+                    let body = remote_contents
+                        .as_ref()
+                        .and_then(|contents| contents.get(&record.path).cloned())
+                        .map(TextBody::Snapshot)
+                        .unwrap_or(TextBody::Local);
+                    TextFileEntry::indexed_with_body(record, indexed_source, body)
+                })
                 .collect::<Vec<_>>();
             if !indexed.overlay_paths.is_empty() || !indexed.missing_paths.is_empty() {
                 records.extend(live_text_overlay(
@@ -1306,6 +1342,31 @@ fn candidate_text_files(
             .collect(),
         index: live_scan_index_with_summary(workspace, &scan_opts)?,
     })
+}
+
+fn remote_content_required(opts: &ScanOptions, index: &Value) -> bool {
+    index.get("source").and_then(Value::as_str) == Some("text_index:remote")
+        && (opts.remote_mode == RemoteMode::Only || opts.remote_snapshot.is_some())
+}
+
+fn remote_content_map(index: &Value) -> Result<Option<BTreeMap<String, String>>> {
+    if index.get("source").and_then(Value::as_str) != Some("text_index:remote") {
+        return Ok(None);
+    }
+    let Some(text_dir) = index.get("path").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let content_path = Path::new(text_dir).join("content.idx");
+    if !content_path.exists() {
+        return Ok(None);
+    }
+    let records = crate::text_index::read_contents(&content_path)?;
+    Ok(Some(
+        records
+            .into_iter()
+            .map(|record| (record.path, record.content))
+            .collect(),
+    ))
 }
 
 fn live_scan_index_with_summary(workspace: &Workspace, opts: &ScanOptions) -> Result<Value> {

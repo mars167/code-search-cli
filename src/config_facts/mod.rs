@@ -4,6 +4,7 @@ mod containers;
 mod detect;
 mod ini;
 mod json;
+mod mybatis;
 mod ranges;
 mod scripts;
 mod support;
@@ -24,6 +25,7 @@ use containers::extract_dockerfile;
 use detect::{extension, is_dockerfile, is_ini_like, is_makefile, is_shell_script};
 use ini::extract_ini_like;
 use json::extract_json;
+use mybatis::extract_mybatis_xml;
 use scripts::{extract_makefile, extract_shell};
 pub(super) use support::{
     clean_key, key_value_fact, make_fact, normalize_key_path, split_once_any,
@@ -71,6 +73,11 @@ pub enum ConfigFactKind {
     DockerInstruction,
     DockerService,
     KubernetesResource,
+    MyBatisNamespace,
+    MyBatisStatement,
+    MyBatisResultMap,
+    MyBatisSqlFragment,
+    MyBatisReference,
     RuntimeConfigMarker,
     DependencyEdge,
     SourceFactFallback,
@@ -190,6 +197,8 @@ pub fn extract_config_facts_for_file(
         ))
     } else if extension(path).as_deref() == Some("json") {
         extract_json(path, &view.source, &edge_context, &base_caveats)
+    } else if extension(path).as_deref() == Some("xml") {
+        extract_mybatis_xml(path, &view.source, &edge_context, &base_caveats)
     } else if extension(path).as_deref() == Some("toml") {
         extract_toml(path, &view.source, &edge_context, &base_caveats)
     } else if matches!(extension(path).as_deref(), Some("yaml" | "yml")) {

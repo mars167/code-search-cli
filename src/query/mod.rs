@@ -17,7 +17,7 @@ use crate::{
     scip_index, search,
     search_pattern::SearchPatternMode,
     syntax,
-    workspace::{ScanOptions, Workspace},
+    workspace::{RemoteMode, ScanOptions, Workspace},
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,8 @@ pub struct QueryOptions {
     pub limit: usize,
     /// Number of surrounding context lines (grep / find).
     pub context: u16,
+    pub remote_mode: RemoteMode,
+    pub remote_snapshot: Option<String>,
 }
 
 impl Default for QueryOptions {
@@ -74,6 +76,8 @@ impl Default for QueryOptions {
             allow_broad: false,
             limit: 100,
             context: 0,
+            remote_mode: RemoteMode::Auto,
+            remote_snapshot: None,
         }
     }
 }
@@ -96,6 +100,8 @@ impl QueryOptions {
             hidden: self.hidden,
             no_ignore: self.no_ignore,
             limit: self.limit,
+            remote_mode: self.remote_mode,
+            remote_snapshot: self.remote_snapshot.clone(),
         }
     }
 }
@@ -168,7 +174,11 @@ impl QueryService {
             scoped_query(query, &scan),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            output::IndexedResponseParts::new(qo.index.clone(), qo.results.clone(), Vec::new()),
+            output::IndexedResponseParts::new(
+                qo.index.clone(),
+                qo.results.clone(),
+                remote_warnings(&qo.index, opts),
+            ),
         );
         Ok(self.finalize(page_response(response, qo)))
     }
@@ -196,7 +206,11 @@ impl QueryService {
             ),
             &self.workspace.snapshot_id,
             output::source_fact(),
-            output::IndexedResponseParts::new(qo.index.clone(), qo.results.clone(), Vec::new()),
+            output::IndexedResponseParts::new(
+                qo.index.clone(),
+                qo.results.clone(),
+                remote_warnings(&qo.index, opts),
+            ),
         );
         Ok(self.finalize(page_response(response, qo)))
     }
@@ -625,6 +639,34 @@ fn path_mode_label(command: &str, mode: SearchPatternMode) -> &'static str {
 fn merge_warnings(mut first: Vec<String>, second: Vec<String>) -> Vec<String> {
     first.extend(second);
     first
+}
+
+fn remote_warnings(index: &Value, opts: &QueryOptions) -> Vec<String> {
+    if index.get("source").and_then(Value::as_str) != Some("text_index:remote") {
+        return Vec::new();
+    }
+    let snapshot = index
+        .get("remote_snapshot_key")
+        .and_then(Value::as_str)
+        .or_else(|| index.get("snapshotKey").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let mut warnings = Vec::new();
+    if opts.remote_mode == RemoteMode::Only || opts.remote_snapshot.is_some() {
+        warnings.push(format!(
+            "remote_only: query used remote snapshot {snapshot}; results are not local edit facts"
+        ));
+    }
+    if index
+        .get("remote_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        == false
+    {
+        warnings.push(format!(
+            "remote_unverified: remote snapshot {snapshot} does not match current local files"
+        ));
+    }
+    warnings
 }
 
 // ---------------------------------------------------------------------------

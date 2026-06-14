@@ -555,7 +555,18 @@ fn runtime_config(path: &str) -> bool {
     }
     matches!(
         extension(&lower).as_deref(),
-        Some("env" | "conf" | "config" | "properties" | "yaml" | "yml" | "json" | "toml" | "ini")
+        Some(
+            "env"
+                | "conf"
+                | "config"
+                | "properties"
+                | "yaml"
+                | "yml"
+                | "json"
+                | "toml"
+                | "ini"
+                | "xml",
+        )
     )
 }
 

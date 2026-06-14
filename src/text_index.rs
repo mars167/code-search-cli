@@ -11,6 +11,12 @@ use crate::workspace::FileRecord;
 
 const DOCS_MAGIC: &[u8; 8] = b"CSDOCS1\0";
 const GRAMS_MAGIC: &[u8; 8] = b"CSGRAM1\0";
+const CONTENT_MAGIC: &[u8; 8] = b"CSCONT1\0";
+
+pub struct ContentRecord {
+    pub path: String,
+    pub content: String,
+}
 
 pub fn write_docs(path: &Path, records: &[FileRecord]) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -66,6 +72,24 @@ pub fn write_grams(path: &Path, root: &Path, records: &[FileRecord]) -> Result<(
     Ok(())
 }
 
+pub fn write_contents(path: &Path, root: &Path, records: &[FileRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(CONTENT_MAGIC)?;
+    write_u32(&mut file, records.len() as u32)?;
+    for record in records {
+        let bytes = fs::read(root.join(&record.path))
+            .with_context(|| format!("failed to read {}", record.path))?;
+        write_string(&mut file, &record.path)?;
+        write_u32(&mut file, bytes.len() as u32)?;
+        file.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
 pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -86,6 +110,23 @@ pub fn read_docs(path: &Path) -> Result<Vec<FileRecord>> {
             mode: 0,
             hash,
         });
+    }
+    Ok(records)
+}
+
+pub fn read_contents(path: &Path) -> Result<Vec<ContentRecord>> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    read_magic(&mut file, CONTENT_MAGIC)?;
+    let count = read_u32(&mut file)? as usize;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let path = read_string(&mut file)?;
+        let len = read_u32(&mut file)? as usize;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes)?;
+        let content = String::from_utf8(bytes)?;
+        records.push(ContentRecord { path, content });
     }
     Ok(records)
 }

@@ -150,6 +150,12 @@ public JSON 不暴露内部计时和扫描统计。
 - `index pack --output <path>` 输出 `.tar.gz` remote snapshot archive；
   `--output -` 或空 output 会把 archive bytes 写到 stdout。`index unpack
   <path>` 只接受该 archive 格式并解包到 `.codetrail/remote/`。
+- MCP 的 `codetrail_find`、`codetrail_grep`、`codetrail_files` 和
+  `codetrail_glob` 接受 `remoteMode: "auto" | "only"` 与
+  `remoteSnapshot`。`auto` 保持本地优先和缺失时 remote fallback；
+  `only` 或显式 `remoteSnapshot` 只查询选中的 remote text snapshot。
+  remote-only 结果通过 caveats 标记 `remote_only`，并在 file proof
+  不能与当前本地文件对齐时标记 `remote_unverified`。
 
 ## 输出契约
 
@@ -230,6 +236,12 @@ flowchart LR
 - `parser_fact` 可以是确定性语法事实，但不能代表 precise semantic reference resolution。
 - `calls` 和 `callers` 即使来自图索引，也必须标为候选。
 - remote 结果必须声明是否与本地文件 proof 对齐；`remote_verified` 仍是共享缓存结果，关键编辑前仍要 `read`。
+- remote-only MCP 查询可以在本地源文件缺失时使用 remote archive 的 text
+  content segment 返回导航线索，但这些结果不能伪装成本地编辑事实，也不能覆盖
+  dirty/staged/worktree 状态。
+- MyBatis mapper XML 的 namespace、statement、resultMap、SQL fragment 和
+  XML 内引用属于 `config_fact` / `source_fact` 层；它们提升召回，不代表
+  SCIP precise semantic reference resolution。
 - 公开输出通过 caveats 暴露这些边界；自动化工具应先看 `severity/category`，不要把 `info/capability` 的能力说明当成风险告警。开发者修改代码前仍应对关键结果执行 `read <file[:range]>`。
 
 ## Saved Query Replay

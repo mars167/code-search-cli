@@ -128,7 +128,11 @@ flowchart LR
   Verify -->|mismatch| RU["remote_unverified"]
 ```
 
-Remote 适合 CI 产物、大仓预热和团队共享。只要本地文件无法与 remote snapshot 对齐，结果就必须降级，调用方需要用 `read` 重新验证。
+Remote 适合 CI 产物、大仓预热和团队共享。remote archive 包含 text
+metadata、gram postings 和 text content segment，因此 MCP remote-only
+查询可以在本地源文件不可读时返回导航线索。只要本地文件无法与 remote
+snapshot 对齐，结果就必须降级，且不能覆盖本地 dirty/staged/worktree 事实；
+调用方需要用 `read` 重新验证可编辑源码。
 
 ## Saved Query
 

@@ -32,6 +32,7 @@ pub fn run(cli: Cli) -> AppResult<i32> {
         cursor: cli.cursor.clone(),
         allow_broad: cli.allow_broad,
         limit: cli.limit,
+        ..ScanOptions::default()
     };
     let mut exit_code = 0;
 
